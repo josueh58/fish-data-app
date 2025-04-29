@@ -1,0 +1,13 @@
+{
+    "indexes": [
+      {
+        "collectionGroup": "samplingEvents",
+        "queryScope": "COLLECTION",
+        "fields": [
+          { "fieldPath": "season", "order": "ASCENDING" },
+          { "fieldPath": "lake", "order": "ASCENDING" },
+          { "fieldPath": "date", "order": "ASCENDING" }
+        ]
+      }
+    ]
+  }
