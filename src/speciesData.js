@@ -8,7 +8,9 @@ const speciesData = {
   "WAE": { name: "Walleye", a: -5.453, b: 3.18 },
   "YP": { name: "Yellow Perch", a: -5.386, b: 3.23 },
   "GS": {name: "Green Sunfish"},
-  "TGT": {name: "Tiger Trout"}
+  "TGT": {name: "Tiger Trout"},
+  "CC": {name: "Common Carp"},
+  "BBH": {name: "Black Bullhead"}
 };
 
 export default speciesData;

@@ -134,7 +134,7 @@
 }
 
 .dashboard-compact {
-  max-height: 300px; /* Increased from 150px for more space */
+  max-height: 350px; /* Increased to accommodate longer titles */
   border: 2px solid #006666;
   border-radius: 8px;
   cursor: pointer;
@@ -150,11 +150,12 @@
 
 .dashboard-compact h3 {
   margin-bottom: 10px;
-  font-size: 1.2em;
+  font-size: 1.1em; /* Slightly smaller to fit longer titles */
+  line-height: 1.3;
 }
 
 .dashboard-compact p {
-  font-size: 0.9em;
+  font-size: 0.85em; /* Adjusted for readability */
 }
 
 .form-container {
@@ -197,6 +198,14 @@
   background-color: #f0f5f5;
 }
 
+.form-group input:disabled,
+.form-group select:disabled,
+.form-group textarea:disabled {
+  background-color: #e0e0e0;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
 .button-group {
   margin-top: 20px;
   display: flex;
@@ -223,6 +232,7 @@
 .button-group button:disabled {
   background-color: #cccccc;
   cursor: not-allowed;
+  transform: none;
 }
 
 .modal {
@@ -329,23 +339,57 @@ tr:nth-child(even) td {
   padding: 20px;
   border-radius: 8px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-  height: auto; /* Dynamic height */
-  overflow-y: auto; /* Enable scrolling */
-  max-height: 600px; /* Increased for more events */
+  height: auto;
+  overflow-y: auto;
+  max-height: 600px;
+}
+
+.map-container {
+  margin: 20px 0;
+  border: 2px solid #006666;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+  height: 300px; /* Consistent with transect map */
+}
+
+.gps-button {
+  padding: 8px 15px;
+  background-color: #28a745;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  margin: 5px 0;
+  transition: background-color 0.3s, transform 0.2s;
+}
+
+.gps-button:hover {
+  background-color: #218838;
+  transform: scale(1.05);
+}
+
+.gps-button:disabled {
+  background-color: #cccccc;
+  cursor: not-allowed;
+  transform: none;
 }
 
 @media (max-width: 1024px) {
   .dashboard-compact {
-    max-height: 250px; /* Slightly smaller for tablets */
+    max-height: 300px;
   }
   .right-content {
-    max-height: 500px; /* Adjusted for tablets */
-    padding-bottom: 20px; /* Prevent button cutoff */
+    max-height: 500px;
+    padding-bottom: 20px;
   }
   .button-group {
     display: flex !important;
     flex-wrap: wrap;
     justify-content: flex-start;
+  }
+  .map-container {
+    height: 250px;
   }
 }
 
@@ -368,11 +412,19 @@ tr:nth-child(even) td {
 
   .right-content {
     width: 100%;
-    max-height: 400px; /* Adjusted for smaller screens */
+    max-height: 400px;
   }
 
   .dashboard-compact {
-    max-height: 200px; /* Smaller for mobile */
+    max-height: 250px;
+  }
+
+  .dashboard-compact h3 {
+    font-size: 1em;
+  }
+
+  .dashboard-compact p {
+    font-size: 0.8em;
   }
 
   table {
@@ -396,11 +448,12 @@ tr:nth-child(even) td {
     max-height: 90vh;
   }
 
-  .dashboard-compact h3 {
-    font-size: 1em;
+  .map-container {
+    height: 200px;
   }
 
-  .dashboard-compact p {
-    font-size: 0.8em;
+  .gps-button {
+    padding: 6px 12px;
+    font-size: 0.9em;
   }
 }

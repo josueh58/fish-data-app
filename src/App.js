@@ -1,53 +1,98 @@
 import { useState, useEffect, Component } from 'react';
 import { db } from './firebase';
-import { collection, addDoc, getDocs, query, where } from 'firebase/firestore';
+import { collection, addDoc, getDocs, query, where, doc, deleteDoc, getDoc, setDoc } from 'firebase/firestore';
 import { Bar } from 'react-chartjs-2';
-import Chart from 'chart.js/auto';
-import { Chart as ChartJS } from 'chart.js';
+import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend } from 'chart.js';
 import annotationPlugin from 'chartjs-plugin-annotation';
 import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
+import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
+import L from 'leaflet';
+import { fromLatLon, toLatLon } from 'utm';
 import speciesData from './speciesData';
 import './App.css';
+import 'leaflet/dist/leaflet.css';
+import SignIn from './SignIn';
+import SignUp from './SignUp';
+import { getAuth, onAuthStateChanged, signOut } from 'firebase/auth';
+import Admin from './Admin';
 
-ChartJS.register(annotationPlugin);
+// Register Chart.js components
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  Title,
+  Tooltip,
+  Legend,
+  annotationPlugin
+);
 
-// Error Boundary Component
-class ErrorBoundary extends Component {
-  state = { hasError: false };
-  static getDerivedStateFromError() {
-    return { hasError: true };
-  }
-  render() {
-    if (this.state.hasError) {
-      return <h1>Something went wrong. Please refresh the page.</h1>;
-    }
-    return this.props.children;
-  }
-}
+// Fix Leaflet default marker icon issue
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+});
 
 function App() {
-  const [view, setView] = useState('input');
+  const [view, setView] = useState('signIn');
+  const [user, setUser] = useState(null);
+  const [role, setRole] = useState(null);
+  const [permissions, setPermissions] = useState({ canEdit: false, canDelete: false });
   const [eventData, setEventData] = useState({
     lake: '', location: '', date: '', observers: '', gear: '',
     cond: '', pH: '', tdS: '', salts: '', temp_water_c: '', amps: '', field_notes: ''
   });
   const [currentEvent, setCurrentEvent] = useState(null);
   const [pastEvents, setPastEvents] = useState([]);
-  const [isOfflineMode, setIsOfflineMode] = useState(false);
   const [gearType, setGearType] = useState('');
   const [selectedTransect, setSelectedTransect] = useState(null);
-  const [fishData, setFishData] = useState({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '' });
+  const [fishData, setFishData] = useState({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '', count: 1 });
   const [selectedSpecies, setSelectedSpecies] = useState('');
   const [showEditNetModal, setShowEditNetModal] = useState(false);
   const [editingSetId, setEditingSetId] = useState(null);
-  const [editNetData, setEditNetData] = useState({ pull_datetime: '', start_utm_e: '', end_utm_n: '' });
+  const [editNetData, setEditNetData] = useState({ pull_datetime: '', latitude: '', longitude: '' });
   const [selectedFishIndices, setSelectedFishIndices] = useState([]);
   const [selectedEventIndices, setSelectedEventIndices] = useState([]);
   const [showModal, setShowModal] = useState(null); // null, 'environmental', 'transect', 'fish'
   const [resultsModal, setResultsModal] = useState(null); // null, 'lengthFrequency', 'abundanceCondition', 'anglerAbundance'
   const [editingFishIndex, setEditingFishIndex] = useState(null); // null or index of fish being edited
-  const [selectedDate, setSelectedDate] = useState(''); // New state for date filter
+  const [isViewOnly, setIsViewOnly] = useState(false); // New state for view-only mode
+  // Reintroduce offline mode state
+  const [isOfflineMode, setIsOfflineMode] = useState(false);
+  // State for lake names and selected lake
+  const [lakeNames, setLakeNames] = useState([]);
+  const [selectedLake, setSelectedLake] = useState('');
+  const [isMapVisible, setIsMapVisible] = useState(false);
+
+  useEffect(() => {
+    const auth = getAuth();
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        setUser(user);
+        // Set all users to 'editor' role by default
+        setRole('editor');
+        console.log('Role set to editor for all users');
+
+        // Set permissions based on user role
+        setPermissions({ canEdit: true, canDelete: true });
+
+        setView('home');
+      } else {
+        setUser(null);
+        setRole(null);
+        setView('signIn');
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleSignOut = () => {
+    const auth = getAuth();
+    signOut(auth);
+  };
 
   useEffect(() => {
     const storedEvent = JSON.parse(localStorage.getItem('currentEvent') || 'null');
@@ -72,45 +117,139 @@ function App() {
     }
 
     const storedPastEvents = JSON.parse(localStorage.getItem('pastEvents') || '[]');
+    console.log('Loaded past events from localStorage:', storedPastEvents); // Log loaded events
     setPastEvents(storedPastEvents);
   }, []);
 
-  const fetchEventsFromFirebase = async () => {
-    if (isOfflineMode) {
-      alert('Cannot sync with Firebase in offline mode.');
-      return;
-    }
-    if (!selectedDate) {
-      alert('Please select a date to sync events.');
-      return;
-    }
+  // Function to fetch unique lake names
+  const fetchLakeNames = async () => {
     try {
-      const q = query(collection(db, 'samplingEvents'), where('location.date', '==', selectedDate));
-      const querySnapshot = await getDocs(q);
-      const firebaseEvents = querySnapshot.docs.map(doc => ({
-        ...doc.data(),
-        firebaseId: doc.id
-      }));
-      // Merge with local pastEvents, avoiding duplicates
-      const existingIds = new Set(pastEvents.map(e => e.firebaseId || `${e.location.lake}-${e.location.date}`));
-      const newEvents = firebaseEvents.filter(e => !existingIds.has(e.firebaseId || `${e.location.lake}-${e.location.date}`));
-      const updatedEvents = [...pastEvents, ...newEvents];
-      setPastEvents(updatedEvents);
-      localStorage.setItem('pastEvents', JSON.stringify(updatedEvents));
-      alert(`Successfully synced ${newEvents.length} events from ${selectedDate}!`);
+      const querySnapshot = await getDocs(collection(db, 'samplingEvents'));
+      const lakeNames = new Set();
+      querySnapshot.forEach(doc => {
+        const lake = doc.data().location.lake;
+        if (lake) lakeNames.add(lake);
+      });
+      return Array.from(lakeNames);
     } catch (error) {
-      alert('Error syncing from Firebase: ' + error.message);
+      console.error('Error fetching lake names:', error);
+      return [];
     }
   };
 
+  // Fetch lake names on component mount
+  useEffect(() => {
+    const loadLakeNames = async () => {
+      const names = await fetchLakeNames();
+      setLakeNames(names);
+    };
+    loadLakeNames();
+  }, []);
+
+  // Update fetchEventsFromFirebase to fetch by lake name
+  const fetchEventsFromFirebase = async () => {
+    if (!selectedLake) {
+      alert('Please select a lake to sync data.');
+      return;
+    }
+    try {
+      console.log('Syncing data from Firebase for lake:', selectedLake); // Log selected lake
+      const eventsQuery = query(
+        collection(db, 'samplingEvents'),
+        where('location.lake', '==', selectedLake)
+      );
+      const querySnapshot = await getDocs(eventsQuery);
+      console.log('Query snapshot size:', querySnapshot.size); // Log the number of documents fetched
+      const events = querySnapshot.docs.map(doc => ({ ...doc.data(), firebaseId: doc.id }));
+      console.log('Fetched events:', events); // Log the fetched events
+      setPastEvents(events);
+      localStorage.setItem('pastEvents', JSON.stringify(events));
+      alert(`Data synced successfully from Firebase. Total events: ${events.length}`);
+    } catch (error) {
+      console.error('Error syncing data from Firebase:', error); // Log error details
+      alert('Error syncing data from Firebase: ' + error.message);
+    }
+  };
+
+  const deleteSurvey = async (event, index) => {
+    if (!window.confirm(`Are you sure you want to delete the survey for ${event.location.lake} on ${event.location.date} locally from this device?`)) {
+      return;
+    }
+    const updatedEvents = pastEvents.filter((_, i) => i !== index);
+    setPastEvents(updatedEvents);
+    localStorage.setItem('pastEvents', JSON.stringify(updatedEvents));
+    setSelectedEventIndices(prev => prev.filter(i => i !== index));
+    alert('Survey deleted locally from this device.');
+  };
+
+  const deleteSelectedEvents = async () => {
+    if (selectedEventIndices.length === 0) {
+      alert('Please select past surveys to delete from Firebase.');
+      return;
+    }
+    if (!window.confirm(`Are you sure you want to delete ${selectedEventIndices.length} selected surveys from Firebase?`)) {
+      return;
+    }
+    const updatedEvents = pastEvents.filter((_, index) => !selectedEventIndices.includes(index));
+    setPastEvents(updatedEvents);
+    localStorage.setItem('pastEvents', JSON.stringify(updatedEvents));
+
+    for (const index of selectedEventIndices) {
+      const event = pastEvents[index];
+      if (event.firebaseId) {
+        try {
+          await deleteDoc(doc(db, 'samplingEvents', event.firebaseId));
+        } catch (error) {
+          alert(`Error deleting survey ${event.location.lake} - ${event.location.date} from Firebase: ${error.message}`);
+        }
+      }
+    }
+    alert('Selected surveys deleted successfully from Firebase!');
+    setSelectedEventIndices([]);
+  };
+
   const handleEventChange = (field, value) => {
+    if (isViewOnly) return;
     setEventData({ ...eventData, [field]: value });
   };
 
   const handleFishChange = (field, value) => {
+    if (isViewOnly) return;
     setFishData({ ...fishData, [field]: value });
   };
 
+  const getGPSLocation = (setFormData, formType) => {
+    if (isViewOnly) return;
+    if (!navigator.geolocation) {
+      alert('Geolocation is not supported by this device.');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        // Convert lat/long to UTM (assuming Zone 12, adjust as needed)
+        const utmCoords = fromLatLon(latitude, longitude, 12); // Replace 12 with your UTM zone
+        if (formType === 'editNet') {
+          setEditNetData({
+            ...editNetData,
+            latitude: utmCoords.easting.toFixed(2),
+            longitude: utmCoords.northing.toFixed(2)
+          });
+        } else {
+          setFormData({
+            startUtmE: utmCoords.easting.toFixed(2),
+            endUtmN: utmCoords.northing.toFixed(2)
+          });
+        }
+        alert('GPS coordinates successfully fetched and converted to UTM.');
+      },
+      (error) => {
+        alert('Error getting GPS location: ' + error.message);
+      }
+    );
+  };
+
+  // Ensure the app allows data entry on new surveys
   const handleEventSubmit = (e) => {
     e.preventDefault();
     if (!eventData.lake || !eventData.date || !eventData.observers || !eventData.gear) {
@@ -141,11 +280,12 @@ function App() {
     };
     setCurrentEvent(newEvent);
     localStorage.setItem('currentEvent', JSON.stringify(newEvent));
-    setShowModal(null);
+    setView('input'); // Ensure the view is set to input to show the dashboards
   };
 
   const addTransect = (e) => {
     e.preventDefault();
+    if (isViewOnly) return;
     const effortTimeSec = Number(document.getElementById('effortTimeSec').value);
     const startUtmE = Number(document.getElementById('startUtmE').value);
     const endUtmN = Number(document.getElementById('endUtmN').value);
@@ -170,11 +310,11 @@ function App() {
     setSelectedTransect(newSet.set_id);
     localStorage.setItem('currentEvent', JSON.stringify(updatedEvent));
     document.getElementById('transectForm').reset();
-    setShowModal(null);
   };
 
   const addNetSet = (e) => {
     e.preventDefault();
+    if (isViewOnly) return;
     const setDatetime = document.getElementById('setDatetime').value;
     const startUtmE = Number(document.getElementById('startUtmENet').value);
     const endUtmN = Number(document.getElementById('endUtmNNet').value);
@@ -200,16 +340,16 @@ function App() {
     setSelectedTransect(newSet.set_id);
     localStorage.setItem('currentEvent', JSON.stringify(updatedEvent));
     document.getElementById('netSetForm').reset();
-    setShowModal(null);
   };
 
   const openEditNetModal = (setId) => {
+    if (isViewOnly) return;
     const set = currentEvent.sets.find(s => s.set_id === setId);
     if (set) {
       setEditNetData({
         pull_datetime: set.pull_datetime || '',
-        start_utm_e: set.location.start_utm_e || '',
-        end_utm_n: set.location.end_utm_n || ''
+        latitude: set.location.start_utm_e || '',
+        longitude: set.location.end_utm_n || ''
       });
       setEditingSetId(setId);
       setShowEditNetModal(true);
@@ -218,6 +358,7 @@ function App() {
 
   const handleEditNetSubmit = (e) => {
     e.preventDefault();
+    if (isViewOnly) return;
     const pullDatetime = document.getElementById('editPullDatetime').value;
     const startUtmE = Number(document.getElementById('editStartUtmE').value);
     const endUtmN = Number(document.getElementById('editEndUtmN').value);
@@ -235,7 +376,7 @@ function App() {
         if (newSet.pull_datetime) {
           const soakTimeMs = new Date(newSet.pull_datetime) - new Date(newSet.set_datetime);
           newSet.soak_time_hours = (soakTimeMs / 3600000).toFixed(2);
-          newSet.cpue = newSet.fish.length / newSet.soak_time_hours;
+          newSet.cpue = newSet.fish.reduce((sum, fish) => sum + (fish.count || 1), 0) / newSet.soak_time_hours;
         }
         return newSet;
       }
@@ -244,13 +385,14 @@ function App() {
     const updatedEvent = { ...currentEvent, sets: updatedSets };
     setCurrentEvent(updatedEvent);
     localStorage.setItem('currentEvent', JSON.stringify(updatedEvent));
-    setShowEditNetModal(false);
-    setEditNetData({ pull_datetime: '', start_utm_e: '', end_utm_n: '' });
+    setEditNetData({ pull_datetime: '', latitude: '', longitude: '' });
     setEditingSetId(null);
+    setShowEditNetModal(false);
   };
 
   const addFish = (e) => {
     e.preventDefault();
+    if (isViewOnly) return;
     if (!selectedTransect) {
       alert('Please select a transect or net set before adding fish.');
       return;
@@ -262,12 +404,13 @@ function App() {
       stomach_content: fishData.stomach_content,
       sex: fishData.sex,
       fats: fishData.fats,
-      notes: fishData.notes
+      notes: fishData.notes,
+      count: Number(fishData.count) || 1
     };
     const updatedSets = currentEvent.sets.map(set => {
       if (set.set_id === selectedTransect) {
         const updatedSet = { ...set, fish: [...set.fish, newFish] };
-        updatedSet.cpue = updatedSet.fish.length / (updatedSet.effort_time_hours || updatedSet.soak_time_hours || 1);
+        updatedSet.cpue = updatedSet.fish.reduce((sum, fish) => sum + (fish.count || 1), 0) / (updatedSet.effort_time_hours || updatedSet.soak_time_hours || 1);
         return updatedSet;
       }
       return set;
@@ -275,13 +418,42 @@ function App() {
     const updatedEvent = { ...currentEvent, sets: updatedSets };
     setCurrentEvent(updatedEvent);
     localStorage.setItem('currentEvent', JSON.stringify(updatedEvent));
-    setFishData({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '' });
+    setFishData({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '', count: 1 });
     setSelectedFishIndices([]);
-    // Modal remains open
+  };
+
+  const addCarpNoLength = () => {
+    if (isViewOnly) return;
+    if (!selectedTransect) {
+      alert('Please select a transect or net set before adding fish.');
+      return;
+    }
+    const newFish = {
+      spp: 'Carp',
+      length: null,
+      weight: null,
+      stomach_content: '',
+      sex: '',
+      fats: '',
+      notes: '',
+      count: 1
+    };
+    const updatedSets = currentEvent.sets.map(set => {
+      if (set.set_id === selectedTransect) {
+        const updatedSet = { ...set, fish: [...set.fish, newFish] };
+        updatedSet.cpue = updatedSet.fish.reduce((sum, fish) => sum + (fish.count || 1), 0) / (updatedSet.effort_time_hours || updatedSet.soak_time_hours || 1);
+        return updatedSet;
+      }
+      return set;
+    });
+    const updatedEvent = { ...currentEvent, sets: updatedSets };
+    setCurrentEvent(updatedEvent);
+    localStorage.setItem('currentEvent', JSON.stringify(updatedEvent));
   };
 
   const updateFish = (e) => {
     e.preventDefault();
+    if (isViewOnly) return;
     if (!selectedTransect || editingFishIndex === null) {
       alert('Please select a fish entry to update.');
       return;
@@ -293,7 +465,8 @@ function App() {
       stomach_content: fishData.stomach_content,
       sex: fishData.sex,
       fats: fishData.fats,
-      notes: fishData.notes
+      notes: fishData.notes,
+      count: Number(fishData.count) || 1
     };
     const updatedSets = currentEvent.sets.map(set => {
       if (set.set_id === selectedTransect) {
@@ -301,7 +474,7 @@ function App() {
           index === editingFishIndex ? updatedFish : fish
         );
         const updatedSet = { ...set, fish: updatedFishArray };
-        updatedSet.cpue = updatedSet.fish.length / (updatedSet.effort_time_hours || updatedSet.soak_time_hours || 1);
+        updatedSet.cpue = updatedSet.fish.reduce((sum, fish) => sum + (fish.count || 1), 0) / (updatedSet.effort_time_hours || updatedSet.soak_time_hours || 1);
         return updatedSet;
       }
       return set;
@@ -309,12 +482,13 @@ function App() {
     const updatedEvent = { ...currentEvent, sets: updatedSets };
     setCurrentEvent(updatedEvent);
     localStorage.setItem('currentEvent', JSON.stringify(updatedEvent));
-    setFishData({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '' });
+    setFishData({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '', count: 1 });
     setEditingFishIndex(null);
     setSelectedFishIndices([]);
   };
 
   const deleteSelectedFish = () => {
+    if (isViewOnly) return;
     if (!selectedTransect || selectedFishIndices.length === 0) {
       alert('Please select fish entries to delete.');
       return;
@@ -323,7 +497,7 @@ function App() {
       if (set.set_id === selectedTransect) {
         const updatedFish = set.fish.filter((_, index) => !selectedFishIndices.includes(index));
         const updatedSet = { ...set, fish: updatedFish };
-        updatedSet.cpue = updatedSet.fish.length / (updatedSet.effort_time_hours || updatedSet.soak_time_hours || 1);
+        updatedSet.cpue = updatedFish.reduce((sum, fish) => sum + (fish.count || 1), 0) / (updatedSet.effort_time_hours || updatedSet.soak_time_hours || 1);
         return updatedSet;
       }
       return set;
@@ -335,37 +509,43 @@ function App() {
     setEditingFishIndex(null);
   };
 
-  const deleteSelectedEvents = () => {
-    if (selectedEventIndices.length === 0) {
-      alert('Please select past events to delete.');
-      return;
-    }
-    const updatedEvents = pastEvents.filter((_, index) => !selectedEventIndices.includes(index));
-    setPastEvents(updatedEvents);
-    localStorage.setItem('pastEvents', JSON.stringify(updatedEvents));
-    setSelectedEventIndices([]);
-  };
-
   const saveEventToFirebase = async () => {
+    if (isViewOnly) return;
+
     if (isOfflineMode) {
+      alert('Offline mode enabled: Survey finalized and saved locally. It will sync when you go online.');
+      // Save locally
       const updatedEvents = [...pastEvents, { ...currentEvent, is_finalized: true }];
       setPastEvents(updatedEvents);
       localStorage.setItem('pastEvents', JSON.stringify(updatedEvents));
-      alert('Offline mode enabled: Event finalized and saved locally. It will sync when you go online.');
-      resetApp();
-      return;
+    } else {
+      try {
+        // Upload to Firebase
+        const docRef = await addDoc(collection(db, 'samplingEvents'), { ...currentEvent, is_finalized: true });
+        console.log('Document written with ID: ', docRef.id);
+        alert('Survey finalized and uploaded to Firebase successfully.');
+      } catch (error) {
+        console.error('Error uploading survey to Firebase: ', error);
+        alert('Error uploading survey to Firebase: ' + error.message);
+      }
     }
-    try {
-      await addDoc(collection(db, 'samplingEvents'), { ...currentEvent, is_finalized: true });
-      alert('Event finalized and saved to Firebase!');
-      resetApp();
-    } catch (error) {
-      alert('Error finalizing event in Firebase: ' + error.message);
-    }
+
+    resetApp();
   };
 
   const saveAsUnfinalized = () => {
-    const updatedEvents = [...pastEvents, { ...currentEvent, is_finalized: false }];
+    if (isViewOnly) return;
+    const existingIndex = pastEvents.findIndex(event => event.location.lake === currentEvent.location.lake && event.location.date === currentEvent.location.date);
+    let updatedEvents;
+    if (existingIndex !== -1) {
+      // Update the existing survey
+      updatedEvents = pastEvents.map((event, index) =>
+        index === existingIndex ? { ...currentEvent, is_finalized: false } : event
+      );
+    } else {
+      // Add as a new survey if it doesn't exist
+      updatedEvents = [...pastEvents, { ...currentEvent, is_finalized: false }];
+    }
     setPastEvents(updatedEvents);
     localStorage.setItem('pastEvents', JSON.stringify(updatedEvents));
     resetApp();
@@ -390,6 +570,7 @@ function App() {
     });
     setGearType(event.gear_type || '');
     setSelectedTransect(event.sets?.length > 0 ? event.sets[0].set_id : null);
+    setIsViewOnly(false); // Allow full interaction regardless of finalized status
     setView('input');
   };
 
@@ -401,12 +582,12 @@ function App() {
     const filename = `${lakeName}_${eventDate}.xlsx`;
 
     const headers = [
-      'Lake', 'Observers', 'Month', 'Day', 'Year', 'Gear', 'Transect #', 
-      'Effort_time (sec)', 'Effort_time (min)', 'Effort_time (hr)', 'CPUE', 
-      'Start UTM_E', 'End UTM_N', 'Location', 'Cond', 'pH', 'tdS', 'Salts', 
+      'Lake', 'Observers', 'Month', 'Day', 'Year', 'Gear', 'Transect #',
+      'Effort_time (sec)', 'Effort_time (min)', 'Effort_time (hr)', 'CPUE',
+      'Start UTM_E', 'End UTM_N', 'Location', 'Cond', 'pH', 'tdS', 'Salts',
       'Temp_Water_C', 'AMPS'
     ];
-    const fishHeader = ['SPP', 'TL_mm', 'WT_g', 'Sex', 'Stomach Content', 'Notes'];
+    const fishHeader = ['SPP', 'Count', 'TL_mm', 'WT_g', 'Sex', 'Stomach Content', 'Notes'];
 
     const data = [];
     currentEvent.sets.forEach(set => {
@@ -442,6 +623,7 @@ function App() {
 
       const fishData = (set.fish || []).map(fish => [
         fish.spp || 'N/A',
+        fish.count || 1,
         fish.length || '',
         fish.weight || '',
         fish.sex || '',
@@ -460,32 +642,6 @@ function App() {
     saveAs(blob, filename);
   };
 
-  const catchSummary = () => {
-    if (!currentEvent || !currentEvent.sets) return [];
-    const speciesData = {};
-    currentEvent.sets.forEach(set => {
-      set.fish.forEach(fish => {
-        if (!fish.spp) return;
-        if (!speciesData[fish.spp]) {
-          speciesData[fish.spp] = { count: 0, biomass: 0 };
-        }
-        speciesData[fish.spp].count += 1;
-        speciesData[fish.spp].biomass += fish.weight || 0;
-      });
-    });
-
-    const totalCount = Object.values(speciesData).reduce((sum, d) => sum + d.count, 0);
-    const totalBiomass = Object.values(speciesData).reduce((sum, d) => sum + d.biomass, 0);
-
-    return Object.keys(speciesData).map(spp => ({
-      species: spp,
-      number: speciesData[spp].count,
-      numberPercent: totalCount > 0 ? ((speciesData[spp].count / totalCount) * 100).toFixed(1) : 0,
-      biomass: (speciesData[spp].biomass / 1000).toFixed(2),
-      biomassPercent: totalBiomass > 0 ? ((speciesData[spp].biomass / totalBiomass) * 100).toFixed(1) : 0,
-    }));
-  };
-
   const abundanceCondition = () => {
     if (!currentEvent || !currentEvent.sets) return [];
     const speciesStats = {};
@@ -493,16 +649,22 @@ function App() {
       set.fish.forEach(fish => {
         if (!fish.spp) return;
         if (!speciesStats[fish.spp]) speciesStats[fish.spp] = { count: 0, tl: [], wt: [], wr: [] };
-        speciesStats[fish.spp].count += 1;
-        if (fish.length) speciesStats[fish.spp].tl.push(fish.length);
+        speciesStats[fish.spp].count += fish.count || 1;
+        if (fish.length) {
+          for (let i = 0; i < (fish.count || 1); i++) {
+            speciesStats[fish.spp].tl.push(fish.length);
+          }
+        }
         if (fish.weight) {
-          speciesStats[fish.spp].wt.push(fish.weight);
-          const speciesCoefficients = speciesData[fish.spp];
-          if (speciesCoefficients && speciesCoefficients.a && speciesCoefficients.b && fish.length) {
-            const logWs = speciesCoefficients.a + speciesCoefficients.b * Math.log10(fish.length);
-            const Ws = Math.pow(10, logWs);
-            const Wr = (fish.weight / Ws) * 100;
-            speciesStats[fish.spp].wr.push(Wr);
+          for (let i = 0; i < (fish.count || 1); i++) {
+            speciesStats[fish.spp].wt.push(fish.weight);
+            const speciesCoefficients = speciesData[fish.spp];
+            if (speciesCoefficients && speciesCoefficients.a && speciesCoefficients.b && fish.length) {
+              const logWs = speciesCoefficients.a + speciesCoefficients.b * Math.log10(fish.length);
+              const Ws = Math.pow(10, logWs);
+              const Wr = (fish.weight / Ws) * 100;
+              speciesStats[fish.spp].wr.push(Wr);
+            }
           }
         }
       });
@@ -532,9 +694,17 @@ function App() {
       set.fish.forEach(fish => {
         if (!fish.spp) return;
         if (!speciesStats[fish.spp]) speciesStats[fish.spp] = { count: 0, tl: [], wt: [] };
-        speciesStats[fish.spp].count += 1;
-        if (fish.length) speciesStats[fish.spp].tl.push(fish.length / 25.4); // Convert mm to inches
-        if (fish.weight) speciesStats[fish.spp].wt.push(fish.weight / 453.592); // Convert grams to pounds
+        speciesStats[fish.spp].count += fish.count || 1;
+        if (fish.length) {
+          for (let i = 0; i < (fish.count || 1); i++) {
+            speciesStats[fish.spp].tl.push(fish.length / 25.4); // Convert mm to inches
+          }
+        }
+        if (fish.weight) {
+          for (let i = 0; i < (fish.count || 1); i++) {
+            speciesStats[fish.spp].wt.push(fish.weight / 453.592); // Convert grams to pounds
+          }
+        }
       });
     });
 
@@ -553,20 +723,32 @@ function App() {
     });
   };
 
+  const getFishCountNote = () => {
+    if (!currentEvent || !currentEvent.sets) return '';
+    let totalFish = 0;
+    let measuredFish = 0;
+    currentEvent.sets.forEach(set => {
+      set.fish.forEach(fish => {
+        totalFish += fish.count || 1;
+        if (fish.length || fish.weight) measuredFish += fish.count || 1;
+      });
+    });
+    if (totalFish === measuredFish) return '';
+    return `Note: Only ${measuredFish} individuals were measured and weighed; total count is ${totalFish}.`;
+  };
+
   const histogramData = () => {
     if (!currentEvent || !currentEvent.sets || !selectedSpecies) return null;
 
-    // Clear previous data to prevent accumulation
     const lengths = currentEvent.sets
       .flatMap(set => set.fish || [])
       .filter(fish => fish.spp === selectedSpecies && fish.length !== null && !isNaN(fish.length))
-      .map(fish => fish.length / 25.4);
+      .flatMap(fish => Array(fish.count || 1).fill(fish.length / 25.4));
 
     if (lengths.length === 0) return null;
 
-    // Cap bin range to avoid excessive growth
     const minLength = Math.max(Math.floor(Math.min(...lengths)) - 1, 0);
-    const maxLength = Math.min(Math.ceil(Math.max(...lengths)) + 1, 100); // Cap at 100 inches
+    const maxLength = Math.min(Math.ceil(Math.max(...lengths)) + 1, 100);
     const bins = Array.from({ length: maxLength - minLength + 1 }, (_, i) => minLength + i);
 
     const histogramData = Array(bins.length - 1).fill(0);
@@ -594,10 +776,12 @@ function App() {
         maintainAspectRatio: false,
         scales: {
           x: {
+            type: 'category',
             title: { display: true, text: 'Total Length (inches)' },
             ticks: { stepSize: 1 }
           },
           y: {
+            type: 'linear',
             title: { display: true, text: 'Number of Fish' },
             beginAtZero: true,
             max: maxY
@@ -609,10 +793,10 @@ function App() {
             annotations: [
               {
                 type: 'label',
-                xValue: minLength + 0.5,
+                xValue: 0,
                 yValue: maxY * 0.95,
                 content: `n=${lengths.length}`,
-                font: { weight: 'bold', size: 12, color: '#008080' },
+                font: { weight: 'bold', size: 12 },
                 color: '#008080',
                 position: 'start'
               }
@@ -625,6 +809,9 @@ function App() {
 
   const speciesOptions = [...new Set(currentEvent && currentEvent.sets ? currentEvent.sets.flatMap(set => set.fish.map(fish => fish.spp)).filter(Boolean) : [])];
 
+  // Add console log to verify speciesOptions
+  console.log('Species Options:', speciesOptions);
+
   const resetApp = () => {
     setView('input');
     setCurrentEvent(null);
@@ -632,15 +819,26 @@ function App() {
       lake: '', location: '', date: '', observers: '', gear: '',
       cond: '', pH: '', tdS: '', salts: '', temp_water_c: '', amps: '', field_notes: ''
     });
-    setFishData({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '' });
+    setFishData({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '', count: 1 });
     setGearType('');
     setSelectedTransect(null);
     setSelectedSpecies('');
     setSelectedFishIndices([]);
     setSelectedEventIndices([]);
     setEditingFishIndex(null);
+    setIsViewOnly(false);
     localStorage.removeItem('currentEvent');
   };
+
+  const renderHomePage = () => (
+    <div className="welcome">
+      <h1>Welcome to NERO Sportfish Data</h1>
+      <div className="welcome-buttons">
+        <button onClick={() => setView('input')}>New Survey</button>
+        <button onClick={() => setView('past')}>View Past Surveys</button>
+      </div>
+    </div>
+  );
 
   const renderEnvironmentalDashboard = () => (
     <div className="form-container">
@@ -648,23 +846,23 @@ function App() {
         <h4>Site Information</h4>
         <div className="form-group">
           <label>Lake</label>
-          <input value={eventData.lake} onChange={(e) => handleEventChange('lake', e.target.value)} required />
+          <input value={eventData.lake} onChange={(e) => handleEventChange('lake', e.target.value)} required disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>Location</label>
-          <input value={eventData.location} onChange={(e) => handleEventChange('location', e.target.value)} />
+          <input value={eventData.location} onChange={(e) => handleEventChange('location', e.target.value)} disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>Date</label>
-          <input type="date" value={eventData.date} onChange={(e) => handleEventChange('date', e.target.value)} required />
+          <input type="date" value={eventData.date} onChange={(e) => handleEventChange('date', e.target.value)} required disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>Observers</label>
-          <input value={eventData.observers} onChange={(e) => handleEventChange('observers', e.target.value)} required />
+          <input value={eventData.observers} onChange={(e) => handleEventChange('observers', e.target.value)} required disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>Gear</label>
-          <select value={eventData.gear} onChange={(e) => { handleEventChange('gear', e.target.value); setGearType(e.target.value); }} required>
+          <select value={eventData.gear} onChange={(e) => { handleEventChange('gear', e.target.value); setGearType(e.target.value); }} required disabled={isViewOnly}>
             <option value="">Select Gear</option>
             <option value="electrofishing">Electrofishing</option>
             <option value="gillnet">Gillnet</option>
@@ -678,6 +876,7 @@ function App() {
             onChange={(e) => handleEventChange('field_notes', e.target.value)}
             placeholder="General observations (e.g., weather, site conditions)"
             rows="4"
+            disabled={isViewOnly}
           />
         </div>
       </div>
@@ -685,75 +884,149 @@ function App() {
         <h4>Environmental Data</h4>
         <div className="form-group">
           <label>pH</label>
-          <input type="number" step="0.1" value={eventData.pH} onChange={(e) => handleEventChange('pH', e.target.value)} placeholder="e.g., 7.5" />
+          <input type="number" step="0.1" value={eventData.pH} onChange={(e) => handleEventChange('pH', e.target.value)} placeholder="e.g., 7.5" disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>Temp (°C)</label>
-          <input type="number" step="0.1" value={eventData.temp_water_c} onChange={(e) => handleEventChange('temp_water_c', e.target.value)} placeholder="e.g., 20.0" />
+          <input type="number" step="0.1" value={eventData.temp_water_c} onChange={(e) => handleEventChange('temp_water_c', e.target.value)} placeholder="e.g., 20.0" disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>Cond</label>
-          <input type="number" value={eventData.cond} onChange={(e) => handleEventChange('cond', e.target.value)} placeholder="e.g., 500" />
+          <input type="number" value={eventData.cond} onChange={(e) => handleEventChange('cond', e.target.value)} placeholder="e.g., 500" disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>tdS</label>
-          <input type="number" value={eventData.tdS} onChange={(e) => handleEventChange('tdS', e.target.value)} placeholder="e.g., 300" />
+          <input type="number" value={eventData.tdS} onChange={(e) => handleEventChange('tdS', e.target.value)} placeholder="e.g., 300" disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>Salts</label>
-          <input type="number" step="0.1" value={eventData.salts} onChange={(e) => handleEventChange('salts', e.target.value)} placeholder="e.g., 0.5" />
+          <input type="number" step="0.1" value={eventData.salts} onChange={(e) => handleEventChange('salts', e.target.value)} placeholder="e.g., 0.5" disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>AMPS</label>
-          <input type="number" step="0.1" value={eventData.amps} onChange={(e) => handleEventChange('amps', e.target.value)} placeholder="e.g., 10.0" />
+          <input type="number" step="0.1" value={eventData.amps} onChange={(e) => handleEventChange('amps', e.target.value)} placeholder="e.g., 10.0" disabled={isViewOnly} />
         </div>
       </div>
       <div className="button-group">
-        <button onClick={handleEventSubmit}>Save Environmental Data</button>
+        <button onClick={handleEventSubmit} disabled={isViewOnly}>Save Environmental Data</button>
         <button type="button" onClick={() => setShowModal(null)}>Close</button>
       </div>
     </div>
   );
 
-  const renderTransectDashboard = () => (
-    <div>
-      {currentEvent.sets.length === 0 ? (
-        <p>No transects or net sets added yet.</p>
-      ) : (
-        <ul>
-          {currentEvent.sets.map((set) => (
-            <li key={set.set_id}>
-              {set.type === 'transect' ? `Transect #${set.set_id}` : `Net #${set.set_id}`} 
-              {set.type === 'net_set' && !set.pull_datetime && <span className="pending-label"> (Pending)</span>}
-              - CPUE: {set.cpue || 'N/A'}
-              {set.type === 'net_set' && (
-                <button onClick={() => openEditNetModal(set.set_id)}>Edit Pull Date/Location</button>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="button-group">
-        <button onClick={addTransect} disabled={gearType !== 'electrofishing'}>Add Transect</button>
-        <button onClick={addNetSet} disabled={gearType !== 'gillnet' && gearType !== 'fyke_net'}>Add Net Set</button>
+  const renderTransectDashboard = () => {
+    const waypoints = currentEvent?.sets.map(set => {
+      const { latitude, longitude } = set.location;
+      if (latitude == null || longitude == null) {
+        console.error('Invalid coordinates:', latitude, longitude);
+        return null; // Skip invalid waypoints
+      }
+      const start = [latitude, longitude];
+      const end = [latitude + 0.001, longitude + 0.001]; // Example offset for end point
+      return {
+        set_id: set.set_id,
+        type: set.type,
+        start,
+        end
+      };
+    }).filter(Boolean); // Remove null entries
+
+    const mapCenter = waypoints.length > 0 ? waypoints[0].start : [39.0, -110.0]; // Default center
+
+    return (
+      <div>
+        {currentEvent.sets.length === 0 ? (
+          <p>No transects or net sets added yet.</p>
+        ) : (
+          <ul>
+            {currentEvent.sets.map((set) => (
+              <li key={set.set_id}>
+                {set.type === 'transect' ? `Transect #${set.set_id}` : `Net #${set.set_id}`}
+                {set.type === 'net_set' && !set.pull_datetime && <span className="pending-label"> (Pending)</span>}
+                - CPUE: {set.cpue || 'N/A'}
+                {set.type === 'net_set' && (
+                  <button onClick={() => openEditNetModal(set.set_id)} disabled={isViewOnly}>Edit Pull Date/Location</button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="button-group">
+          <button onClick={addTransect} disabled={gearType !== 'electrofishing' || isViewOnly}>Add Transect</button>
+          <button onClick={addNetSet} disabled={(gearType !== 'gillnet' && gearType !== 'fyke_net') || isViewOnly}>Add Net Set</button>
+          <button onClick={() => setIsMapVisible(!isMapVisible)}>
+            {isMapVisible ? 'Hide Map' : 'Show Map'}
+          </button>
+        </div>
+        {isMapVisible && waypoints.length > 0 && (
+          <div className="map-container">
+            <MapContainer center={mapCenter} zoom={10} style={{ height: '300px', width: '100%' }}>
+              <TileLayer
+                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                attribution='© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+              />
+              {waypoints.map(waypoint => (
+                <div key={waypoint.set_id}>
+                  <Marker position={waypoint.start} />
+                  <Marker position={waypoint.end} />
+                  <Polyline positions={[waypoint.start, waypoint.end]} color={waypoint.type === 'transect' ? 'blue' : 'red'} />
+                </div>
+              ))}
+            </MapContainer>
+          </div>
+        )}
+        <form id="transectForm" style={{ display: gearType === 'electrofishing' ? 'block' : 'none' }}>
+          <input type="number" id="effortTimeSec" placeholder="Effort Time (seconds)" required disabled={isViewOnly} />
+          <input type="number" id="startUtmE" placeholder="Start UTM_E" required disabled={isViewOnly} />
+          <input type="number" id="endUtmN" placeholder="End UTM_N" required disabled={isViewOnly} />
+          <button type="button" onClick={() => getGPSLocation((data) => {
+            document.getElementById('startUtmE').value = data.startUtmE;
+            document.getElementById('endUtmN').value = data.endUtmN;
+          }, 'transect')} className="gps-button" disabled={isViewOnly}>Get GPS</button>
+          <button type="submit" onClick={addTransect} disabled={isViewOnly}>Add Transect</button>
+        </form>
+        <form id="netSetForm" style={{ display: (gearType === 'gillnet' || gearType === 'fyke_net') ? 'block' : 'none' }}>
+          <input type="datetime-local" id="setDatetime" placeholder="Set Date and Time" required disabled={isViewOnly} />
+          <input type="number" id="startUtmENet" placeholder="Start UTM_E" required disabled={isViewOnly} />
+          <input type="number" id="endUtmNNet" placeholder="End UTM_N" required disabled={isViewOnly} />
+          <button type="button" onClick={() => getGPSLocation((data) => {
+            document.getElementById('startUtmENet').value = data.startUtmE;
+            document.getElementById('endUtmNNet').value = data.endUtmN;
+          }, 'net')} className="gps-button" disabled={isViewOnly}>Get GPS</button>
+          <button type="submit" onClick={addNetSet} disabled={isViewOnly}>Add Net Set</button>
+        </form>
+        <div className="button-group">
+          <button type="button" onClick={() => setShowModal(null)}>Close</button>
+        </div>
+        {showEditNetModal && (
+          <div className="modal">
+            <div className="modal-content">
+              <h2>Edit Net Pull Date/Location</h2>
+              <form id="editNetForm" onSubmit={handleEditNetSubmit}>
+                <div className="form-group">
+                  <label>Pull Date and Time</label>
+                  <input type="datetime-local" id="editPullDatetime" value={editNetData.pull_datetime} onChange={(e) => setEditNetData({ ...editNetData, pull_datetime: e.target.value })} required disabled={isViewOnly} />
+                </div>
+                <div className="form-group">
+                  <label>Start UTM_E</label>
+                  <input type="number" id="editStartUtmE" value={editNetData.latitude} onChange={(e) => setEditNetData({ ...editNetData, latitude: e.target.value })} required disabled={isViewOnly} />
+                </div>
+                <div className="form-group">
+                  <label>End UTM_N</label>
+                  <input type="number" id="editEndUtmN" value={editNetData.longitude} onChange={(e) => setEditNetData({ ...editNetData, longitude: e.target.value })} required disabled={isViewOnly} />
+                </div>
+                <button type="button" onClick={() => getGPSLocation(null, 'editNet')} className="gps-button" disabled={isViewOnly}>Get GPS</button>
+                <div className="button-group">
+                  <button type="submit" disabled={isViewOnly}>Save Changes</button>
+                  <button type="button" onClick={() => setShowEditNetModal(false)} disabled={isViewOnly}>Cancel</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
       </div>
-      <form id="transectForm" style={{ display: gearType === 'electrofishing' ? 'block' : 'none' }}>
-        <input type="number" id="effortTimeSec" placeholder="Effort Time (seconds)" required />
-        <input type="number" id="startUtmE" placeholder="Start UTM_E" required />
-        <input type="number" id="endUtmN" placeholder="End UTM_N" required />
-        <button type="submit" onClick={addTransect}>Add Transect</button>
-      </form>
-      <form id="netSetForm" style={{ display: (gearType === 'gillnet' || gearType === 'fyke_net') ? 'block' : 'none' }}>
-        <input type="datetime-local" id="setDatetime" placeholder="Set Date and Time" required />
-        <input type="number" id="startUtmENet" placeholder="Start UTM_E" required />
-        <input type="number" id="endUtmNNet" placeholder="End UTM_N" required />
-        <button type="submit" onClick={addNetSet}>Add Net Set</button>
-      </form>
-      <div className="button-group">
-        <button type="button" onClick={() => setShowModal(null)}>Close</button>
-      </div>
-    </div>
-  );
+    );
+  };
 
   const renderFishDashboard = () => (
     <div>
@@ -764,6 +1037,7 @@ function App() {
             value={selectedTransect || ''}
             onChange={(e) => setSelectedTransect(Number(e.target.value))}
             required
+            disabled={isViewOnly}
           >
             <option value="">Select a Transect/Net Set</option>
             {currentEvent.sets.map(set => (
@@ -779,6 +1053,7 @@ function App() {
             value={fishData.spp}
             onChange={(e) => handleFishChange('spp', e.target.value)}
             required
+            disabled={isViewOnly}
           >
             <option value="">Select Species</option>
             {Object.keys(speciesData).map(spp => (
@@ -787,61 +1062,50 @@ function App() {
           </select>
         </div>
         <div className="form-group">
+          <label>Count</label>
+          <input
+            type="number"
+            min="1"
+            value={fishData.count}
+            onChange={(e) => handleFishChange('count', e.target.value)}
+            disabled={isViewOnly}
+          />
+        </div>
+        <div className="form-group">
           <label>Length (mm)</label>
-          <input type="number" value={fishData.length} onChange={(e) => handleFishChange('length', e.target.value)} />
+          <input type="number" value={fishData.length} onChange={(e) => handleFishChange('length', e.target.value)} disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>Weight (g)</label>
-          <input type="number" value={fishData.weight} onChange={(e) => handleFishChange('weight', e.target.value)} />
+          <input type="number" value={fishData.weight} onChange={(e) => handleFishChange('weight', e.target.value)} disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>Stomach Content</label>
-          <input value={fishData.stomach_content} onChange={(e) => handleFishChange('stomach_content', e.target.value)} />
+          <input value={fishData.stomach_content} onChange={(e) => handleFishChange('stomach_content', e.target.value)} disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>Sex</label>
-          <input value={fishData.sex} onChange={(e) => handleFishChange('sex', e.target.value)} />
+          <input value={fishData.sex} onChange={(e) => handleFishChange('sex', e.target.value)} disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>Fats</label>
-          <input value={fishData.fats} onChange={(e) => handleFishChange('fats', e.target.value)} />
+          <input value={fishData.fats} onChange={(e) => handleFishChange('fats', e.target.value)} disabled={isViewOnly} />
         </div>
         <div className="form-group">
           <label>Notes</label>
-          <input value={fishData.notes} onChange={(e) => handleFishChange('notes', e.target.value)} />
+          <input value={fishData.notes} onChange={(e) => handleFishChange('notes', e.target.value)} disabled={isViewOnly} />
         </div>
         <div className="button-group">
-          <button type="submit">{editingFishIndex === null ? 'Add Fish' : 'Update Fish'}</button>
-          <button
-            type="button"
-            onClick={() => {
-              if (!selectedTransect) {
-                alert('Please select a transect or net set before adding fish.');
-                return;
-              }
-              const newFish = { spp: 'Carp', length: null, weight: null, stomach_content: '', sex: '', fats: '', notes: '' };
-              const updatedSets = currentEvent.sets.map(set => {
-                if (set.set_id === selectedTransect) {
-                  const updatedSet = { ...set, fish: [...set.fish, newFish] };
-                  updatedSet.cpue = updatedSet.fish.length / (updatedSet.effort_time_hours || updatedSet.soak_time_hours || 1);
-                  return updatedSet;
-                }
-                return set;
-              });
-              const updatedEvent = { ...currentEvent, sets: updatedSets };
-              setCurrentEvent(updatedEvent);
-              localStorage.setItem('currentEvent', JSON.stringify(updatedEvent));
-            }}
-          >
-            Add Carp (No Length)
-          </button>
+          <button type="submit" disabled={isViewOnly}>{editingFishIndex === null ? 'Add Fish' : 'Update Fish'}</button>
+          <button type="button" onClick={addCarpNoLength} disabled={isViewOnly}>Add Carp (No Length)</button>
           {editingFishIndex !== null && (
             <button
               type="button"
               onClick={() => {
-                setFishData({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '' });
+                setFishData({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '', count: 1 });
                 setEditingFishIndex(null);
               }}
+              disabled={isViewOnly}
             >
               Cancel Edit
             </button>
@@ -859,6 +1123,7 @@ function App() {
                     <th>Select</th>
                     <th>Net Set #</th>
                     <th>Species</th>
+                    <th>Count</th>
                     <th>Length (mm)</th>
                     <th>Weight (g)</th>
                     <th>Sex</th>
@@ -877,6 +1142,7 @@ function App() {
                             type="checkbox"
                             checked={selectedFishIndices.includes(index)}
                             onChange={() => {
+                              if (isViewOnly) return;
                               setSelectedFishIndices(prev =>
                                 prev.includes(index)
                                   ? prev.filter(i => i !== index)
@@ -887,153 +1153,172 @@ function App() {
                         </td>
                         <td
                           onClick={() => {
-                            if (selectedFishIndices.includes(index)) {
-                              setEditingFishIndex(index);
-                              setFishData({
-                                spp: fish.spp || '',
-                                length: fish.length || '',
-                                weight: fish.weight || '',
-                                stomach_content: fish.stomach_content || '',
-                                sex: fish.sex || '',
-                                fats: fish.fats || '',
-                                notes: fish.notes || ''
-                              });
-                            }
+                            if (isViewOnly || !selectedFishIndices.includes(index)) return;
+                            setEditingFishIndex(index);
+                            setFishData({
+                              spp: fish.spp || '',
+                              length: fish.length || '',
+                              weight: fish.weight || '',
+                              stomach_content: fish.stomach_content || '',
+                              sex: fish.sex || '',
+                              fats: fish.fats || '',
+                              notes: fish.notes || '',
+                              count: fish.count || 1
+                            });
                           }}
-                          style={{ cursor: selectedFishIndices.includes(index) ? 'pointer' : 'default' }}
+                          style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
                           {selectedTransect}
                         </td>
                         <td
                           onClick={() => {
-                            if (selectedFishIndices.includes(index)) {
-                              setEditingFishIndex(index);
-                              setFishData({
-                                spp: fish.spp || '',
-                                length: fish.length || '',
-                                weight: fish.weight || '',
-                                stomach_content: fish.stomach_content || '',
-                                sex: fish.sex || '',
-                                fats: fish.fats || '',
-                                notes: fish.notes || ''
-                              });
-                            }
+                            if (isViewOnly || !selectedFishIndices.includes(index)) return;
+                            setEditingFishIndex(index);
+                            setFishData({
+                              spp: fish.spp || '',
+                              length: fish.length || '',
+                              weight: fish.weight || '',
+                              stomach_content: fish.stomach_content || '',
+                              sex: fish.sex || '',
+                              fats: fish.fats || '',
+                              notes: fish.notes || '',
+                              count: fish.count || 1
+                            });
                           }}
-                          style={{ cursor: selectedFishIndices.includes(index) ? 'pointer' : 'default' }}
+                          style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
                           {speciesData[fish.spp]?.name || fish.spp}
                         </td>
                         <td
                           onClick={() => {
-                            if (selectedFishIndices.includes(index)) {
-                              setEditingFishIndex(index);
-                              setFishData({
-                                spp: fish.spp || '',
-                                length: fish.length || '',
-                                weight: fish.weight || '',
-                                stomach_content: fish.stomach_content || '',
-                                sex: fish.sex || '',
-                                fats: fish.fats || '',
-                                notes: fish.notes || ''
-                              });
-                            }
+                            if (isViewOnly || !selectedFishIndices.includes(index)) return;
+                            setEditingFishIndex(index);
+                            setFishData({
+                              spp: fish.spp || '',
+                              length: fish.length || '',
+                              weight: fish.weight || '',
+                              stomach_content: fish.stomach_content || '',
+                              sex: fish.sex || '',
+                              fats: fish.fats || '',
+                              notes: fish.notes || '',
+                              count: fish.count || 1
+                            });
                           }}
-                          style={{ cursor: selectedFishIndices.includes(index) ? 'pointer' : 'default' }}
+                          style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
+                        >
+                          {fish.count || 1}
+                        </td>
+                        <td
+                          onClick={() => {
+                            if (isViewOnly || !selectedFishIndices.includes(index)) return;
+                            setEditingFishIndex(index);
+                            setFishData({
+                              spp: fish.spp || '',
+                              length: fish.length || '',
+                              weight: fish.weight || '',
+                              stomach_content: fish.stomach_content || '',
+                              sex: fish.sex || '',
+                              fats: fish.fats || '',
+                              notes: fish.notes || '',
+                              count: fish.count || 1
+                            });
+                          }}
+                          style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
                           {fish.length || '-'}
                         </td>
                         <td
                           onClick={() => {
-                            if (selectedFishIndices.includes(index)) {
-                              setEditingFishIndex(index);
-                              setFishData({
-                                spp: fish.spp || '',
-                                length: fish.length || '',
-                                weight: fish.weight || '',
-                                stomach_content: fish.stomach_content || '',
-                                sex: fish.sex || '',
-                                fats: fish.fats || '',
-                                notes: fish.notes || ''
-                              });
-                            }
+                            if (isViewOnly || !selectedFishIndices.includes(index)) return;
+                            setEditingFishIndex(index);
+                            setFishData({
+                              spp: fish.spp || '',
+                              length: fish.length || '',
+                              weight: fish.weight || '',
+                              stomach_content: fish.stomach_content || '',
+                              sex: fish.sex || '',
+                              fats: fish.fats || '',
+                              notes: fish.notes || '',
+                              count: fish.count || 1
+                            });
                           }}
-                          style={{ cursor: selectedFishIndices.includes(index) ? 'pointer' : 'default' }}
+                          style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
                           {fish.weight || '-'}
                         </td>
                         <td
                           onClick={() => {
-                            if (selectedFishIndices.includes(index)) {
-                              setEditingFishIndex(index);
-                              setFishData({
-                                spp: fish.spp || '',
-                                length: fish.length || '',
-                                weight: fish.weight || '',
-                                stomach_content: fish.stomach_content || '',
-                                sex: fish.sex || '',
-                                fats: fish.fats || '',
-                                notes: fish.notes || ''
-                              });
-                            }
+                            if (isViewOnly || !selectedFishIndices.includes(index)) return;
+                            setEditingFishIndex(index);
+                            setFishData({
+                              spp: fish.spp || '',
+                              length: fish.length || '',
+                              weight: fish.weight || '',
+                              stomach_content: fish.stomach_content || '',
+                              sex: fish.sex || '',
+                              fats: fish.fats || '',
+                              notes: fish.notes || '',
+                              count: fish.count || 1
+                            });
                           }}
-                          style={{ cursor: selectedFishIndices.includes(index) ? 'pointer' : 'default' }}
+                          style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
                           {fish.sex || '-'}
                         </td>
                         <td
                           onClick={() => {
-                            if (selectedFishIndices.includes(index)) {
-                              setEditingFishIndex(index);
-                              setFishData({
-                                spp: fish.spp || '',
-                                length: fish.length || '',
-                                weight: fish.weight || '',
-                                stomach_content: fish.stomach_content || '',
-                                sex: fish.sex || '',
-                                fats: fish.fats || '',
-                                notes: fish.notes || ''
-                              });
-                            }
+                            if (isViewOnly || !selectedFishIndices.includes(index)) return;
+                            setEditingFishIndex(index);
+                            setFishData({
+                              spp: fish.spp || '',
+                              length: fish.length || '',
+                              weight: fish.weight || '',
+                              stomach_content: fish.stomach_content || '',
+                              sex: fish.sex || '',
+                              fats: fish.fats || '',
+                              notes: fish.notes || '',
+                              count: fish.count || 1
+                            });
                           }}
-                          style={{ cursor: selectedFishIndices.includes(index) ? 'pointer' : 'default' }}
+                          style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
                           {fish.stomach_content || '-'}
                         </td>
                         <td
                           onClick={() => {
-                            if (selectedFishIndices.includes(index)) {
-                              setEditingFishIndex(index);
-                              setFishData({
-                                spp: fish.spp || '',
-                                length: fish.length || '',
-                                weight: fish.weight || '',
-                                stomach_content: fish.stomach_content || '',
-                                sex: fish.sex || '',
-                                fats: fish.fats || '',
-                                notes: fish.notes || ''
-                              });
-                            }
+                            if (isViewOnly || !selectedFishIndices.includes(index)) return;
+                            setEditingFishIndex(index);
+                            setFishData({
+                              spp: fish.spp || '',
+                              length: fish.length || '',
+                              weight: fish.weight || '',
+                              stomach_content: fish.stomach_content || '',
+                              sex: fish.sex || '',
+                              fats: fish.fats || '',
+                              notes: fish.notes || '',
+                              count: fish.count || 1
+                            });
                           }}
-                          style={{ cursor: selectedFishIndices.includes(index) ? 'pointer' : 'default' }}
+                          style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
                           {fish.fats || '-'}
                         </td>
                         <td
                           onClick={() => {
-                            if (selectedFishIndices.includes(index)) {
-                              setEditingFishIndex(index);
-                              setFishData({
-                                spp: fish.spp || '',
-                                length: fish.length || '',
-                                weight: fish.weight || '',
-                                stomach_content: fish.stomach_content || '',
-                                sex: fish.sex || '',
-                                fats: fish.fats || '',
-                                notes: fish.notes || ''
-                              });
-                            }
+                            if (isViewOnly || !selectedFishIndices.includes(index)) return;
+                            setEditingFishIndex(index);
+                            setFishData({
+                              spp: fish.spp || '',
+                              length: fish.length || '',
+                              weight: fish.weight || '',
+                              stomach_content: fish.stomach_content || '',
+                              sex: fish.sex || '',
+                              fats: fish.fats || '',
+                              notes: fish.notes || '',
+                              count: fish.count || 1
+                            });
                           }}
-                          style={{ cursor: selectedFishIndices.includes(index) ? 'pointer' : 'default' }}
+                          style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
                           {fish.notes || '-'}
                         </td>
@@ -1042,7 +1327,7 @@ function App() {
                 </tbody>
               </table>
               <div className="button-group">
-                <button onClick={deleteSelectedFish}>Delete Selected</button>
+                <button onClick={deleteSelectedFish} disabled={isViewOnly}>Delete Selected</button>
               </div>
             </>
           ) : (
@@ -1058,13 +1343,18 @@ function App() {
 
   const renderInputPage = () => (
     <div className="input-page">
-      <h2>NER Sportfish Data - Input</h2>
+      {currentEvent && (
+        <h2 className="lake-title">{currentEvent.location.lake} Survey - Input</h2>
+      )}
+      {!currentEvent && (
+        <h2>New Survey Input</h2>
+      )}
       <div className="dashboard-container">
         <div className="dashboard dashboard-compact" onClick={() => setShowModal('environmental')}>
           <h3>Environmental Data</h3>
           <p>Click to enter site information and environmental data (e.g., Lake, pH, Temp).</p>
         </div>
-        {currentEvent && (
+        {currentEvent && permissions.canEdit && (
           <>
             <div className="dashboard dashboard-compact" onClick={() => setShowModal('transect')}>
               <h3>Transect/Net Set Data</h3>
@@ -1080,13 +1370,13 @@ function App() {
       <div className="button-group">
         {currentEvent && (
           <>
-            <button onClick={() => setView('results')}>View Event Results</button>
-            <button onClick={exportToExcel}>Download Dataset</button>
-            <button onClick={saveEventToFirebase}>Finalize Event</button>
-            <button onClick={saveAsUnfinalized}>Save as Unfinalized</button>
+            <button onClick={() => setView('results')}>View Survey Results</button>
+            {permissions.canEdit && <button onClick={exportToExcel}>Download Dataset</button>}
+            {permissions.canEdit && <button onClick={saveEventToFirebase} disabled={isViewOnly}>Finalize Survey</button>}
+            {permissions.canEdit && <button onClick={saveAsUnfinalized} disabled={isViewOnly}>Save as Unfinalized</button>}
           </>
         )}
-        <button onClick={() => setView('past')}>Past Events</button>
+        <button onClick={() => setView('past')}>Past Surveys</button>
       </div>
       {showModal === 'environmental' && (
         <div className="modal">
@@ -1096,7 +1386,7 @@ function App() {
           </div>
         </div>
       )}
-      {showModal === 'transect' && (
+      {showModal === 'transect' && permissions.canEdit && (
         <div className="modal">
           <div className="modal-content">
             <h2>Transect/Net Set Data</h2>
@@ -1104,7 +1394,7 @@ function App() {
           </div>
         </div>
       )}
-      {showModal === 'fish' && (
+      {showModal === 'fish' && permissions.canEdit && (
         <div className="modal">
           <div className="modal-content">
             <h2>Fish Data</h2>
@@ -1115,254 +1405,317 @@ function App() {
     </div>
   );
 
-  const renderResultsPage = () => (
-    <div className="results-page">
-      <h2>NER Sportfish Data - Event Results</h2>
-      <div className="dashboard-container">
-        <div className="dashboard dashboard-compact" onClick={() => setResultsModal('lengthFrequency')}>
-          <h3>Length Frequency</h3>
-          <p>Click to view length frequency histogram for selected species.</p>
-        </div>
-        <div className="dashboard dashboard-compact" onClick={() => setResultsModal('abundanceCondition')}>
-          <h3>Abundance and Condition</h3>
-          <p>Click to view abundance and condition metrics (CPUE, TL, WT, Wr).</p>
-        </div>
-        <div className="dashboard dashboard-compact" onClick={() => setResultsModal('anglerAbundance')}>
-          <h3>Angler Abundance</h3>
-          <p>Click to view angler-focused metrics (CPUE, TL in inches, WT in pounds).</p>
-        </div>
-        <div className="dashboard dashboard-compact">
-          <h3>Event Metrics</h3>
-          <p>Total Fish: {currentEvent.sets.reduce((sum, set) => sum + (set.fish ? set.fish.length : 0), 0)}</p>
-          <p>Total Effort: {(currentEvent.sets.reduce((sum, set) => sum + (Number(set.effort_time_hours || set.soak_time_hours) || 0), 0)).toFixed(2)} hours</p>
-          <p>Event CPUE: {currentEvent.sets.reduce((sum, set) => sum + (set.fish ? set.fish.length : 0), 0) / currentEvent.sets.reduce((sum, set) => sum + (Number(set.effort_time_hours || set.soak_time_hours) || 0), 0) || 'N/A'}</p>
-        </div>
-      </div>
-      <div className="button-group">
-        <button onClick={() => setView('input')}>Back to Input</button>
-        <button onClick={exportToExcel}>Download Dataset</button>
-      </div>
-      {resultsModal === 'lengthFrequency' && (
-        <div className="modal">
-          <div className="modal-content">
-            <h2>Length Frequency</h2>
-            <select value={selectedSpecies} onChange={(e) => setSelectedSpecies(e.target.value)}>
-              <option value="">Select Species</option>
-              {speciesOptions.map(spp => (
-                <option key={spp} value={spp}>{spp}</option>
-              ))}
-            </select>
-            {selectedSpecies && histogramData() ? (
-              <Bar
-                key={selectedSpecies}
-                data={{
-                  labels: histogramData().labels,
-                  datasets: histogramData().datasets
-                }}
-                options={histogramData().options}
-                height={400}
-              />
-            ) : (
-              <p>Please select a species to view the length frequency histogram.</p>
-            )}
-            <div className="button-group">
-              <button onClick={() => setResultsModal(null)}>Close</button>
-            </div>
-          </div>
-        </div>
-      )}
-      {resultsModal === 'abundanceCondition' && (
-        <div className="modal">
-          <div className="modal-content">
-            <h2>Abundance and Condition</h2>
-            {abundanceCondition().length === 0 ? (
-              <p>No data available for Abundance and Condition.</p>
-            ) : (
-              <table>
-                <thead>
-                  <tr>
-                    <th>Species</th>
-                    <th>Number</th>
-                    <th>CPUE</th>
-                    <th>Mean TL (mm)</th>
-                    <th>Range TL (mm)</th>
-                    <th>Mean WT (g)</th>
-                    <th>Range WT (g)</th>
-                    <th>Mean Wr</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {abundanceCondition().map(row => (
-                    <tr key={row.species}>
-                      <td>{row.species}</td>
-                      <td>{row.count}</td>
-                      <td>{row.cpue}</td>
-                      <td>{row.meanTL}</td>
-                      <td>{row.rangeTL}</td>
-                      <td>{row.meanWT}</td>
-                      <td>{row.rangeWT}</td>
-                      <td>{row.meanWr}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-            <div className="button-group">
-              <button onClick={() => setResultsModal(null)}>Close</button>
-            </div>
-          </div>
-        </div>
-      )}
-      {resultsModal === 'anglerAbundance' && (
-        <div className="modal">
-          <div className="modal-content">
-            <h2>Angler Abundance</h2>
-            {anglerAbundance().length === 0 ? (
-              <p>No data available for Angler Abundance.</p>
-            ) : (
-              <table>
-                <thead>
-                  <tr>
-                    <th>Species</th>
-                    <th>Number</th>
-                    <th>CPUE</th>
-                    <th>TL Range (in)</th>
-                    <th>Avg TL (in)</th>
-                    <th>WT Range (lb)</th>
-                    <th>Avg WT (lb)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {anglerAbundance().map(row => (
-                    <tr key={row.species}>
-                      <td>{row.species}</td>
-                      <td>{row.count}</td>
-                      <td>{row.cpue}</td>
-                      <td>{row.tlRange}</td>
-                      <td>{row.avgTL}</td>
-                      <td>{row.wtRange}</td>
-                      <td>{row.avgWT}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-            <div className="button-group">
-              <button onClick={() => setResultsModal(null)}>Close</button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+  const renderResultsPage = () => {
+    const waypoints = currentEvent?.sets.map(set => {
+      const { start_utm_e, end_utm_n } = set.location;
+      const start = toLatLon(Number(start_utm_e), Number(end_utm_n), 12, 'N');
+      const end = toLatLon(Number(start_utm_e) + 10, Number(end_utm_n) + 10, 12, 'N');
+      return {
+        set_id: set.set_id,
+        type: set.type,
+        start: [start.latitude, start.longitude],
+        end: [end.latitude, end.longitude]
+      };
+    }) || [];
 
-  const renderPastEventsPage = () => (
-    <div className="past-events-page">
-      <h2>NER Sportfish Data - Past Events</h2>
-      <div className="dashboard-container">
-        <div className="dashboard dashboard-compact">
-          <div className="past-events-content">
-            <div className="left-menu">
-              <h3>Menu</h3>
-              <button onClick={() => setView('input')}>New Event</button>
-              <div className="form-group">
-                <label>Select Date to Sync</label>
-                <input
-                  type="date"
-                  value={selectedDate}
-                  onChange={(e) => setSelectedDate(e.target.value)}
-                />
-              </div>
-              <button onClick={fetchEventsFromFirebase}>Sync from Firebase</button>
-            </div>
-            <div className="right-content">
-              {pastEvents.length === 0 ? (
-                <p>No past events available.</p>
-              ) : (
-                <>
-                  <ul>
-                    {pastEvents.map((event, index) => (
-                      <li key={index}>
-                        <input
-                          type="checkbox"
-                          checked={selectedEventIndices.includes(index)}
-                          onChange={() => {
-                            setSelectedEventIndices(prev =>
-                              prev.includes(index)
-                                ? prev.filter(i => i !== index)
-                                : [...prev, index]
-                            );
-                          }}
-                        />
-                        {event.location?.lake} - {event.location?.date} - {event.location?.gear} {event.is_finalized ? '(Finalized)' : '(Unfinalized)'}
-                        <button onClick={() => { loadPastEvent(event); setView('input'); }}>Load</button>
-                      </li>
-                    ))}
-                  </ul>
-                  <div className="button-group">
-                    <button onClick={deleteSelectedEvents}>Delete Selected</button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-          <div className="button-group">
-            <button onClick={() => setView('input')}>Back to Input</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+    const mapCenter = waypoints.length > 0 ? waypoints[0].start : [39.0, -110.0]; // Default center
 
-  return (
-    <ErrorBoundary>
-      <div>
-        <header className="top-bar">
-          <h1>NER Sportfish Data</h1>
-          <div className="top-bar-actions">
-            <div className="offline-toggle">
-              <input
-                type="checkbox"
-                checked={isOfflineMode}
-                onChange={() => setIsOfflineMode(!isOfflineMode)}
-              />
-              <span>Offline</span>
-            </div>
+    return (
+      <div className="results-page">
+        {currentEvent && (
+          <h2 className="lake-title">{currentEvent.location.lake} Survey - Results</h2>
+        )}
+        {!currentEvent && (
+          <h2>NERO Sportfish Data - Survey Results</h2>
+        )}
+        <div className="dashboard-container">
+          <div className="dashboard dashboard-compact" onClick={() => setResultsModal('lengthFrequency')}>
+            <h3>Length Frequency Distribution</h3>
+            <p>Click to view Length Frequency by Species</p>
           </div>
-        </header>
-        <div className="main-content">
-          <div className="logo-container">
-            <img src="/ner-sportfish-logo.png" alt="NER Sportfish Data Logo" className="app-logo" />
+          <div className="dashboard dashboard-compact" onClick={() => setResultsModal('abundanceCondition')}>
+            <h3>Survey Statistics and Location</h3>
+            <p>Click to view abundance, condition metrics, and location map</p>
           </div>
-          {view === 'input' ? renderInputPage() : view === 'results' ? renderResultsPage() : renderPastEventsPage()}
+          <div className="dashboard dashboard-compact" onClick={() => setResultsModal('anglerAbundance')}>
+            <h3>Angler Report</h3>
+            <p>Click to view angler-focused metrics (CPUE, TL in inches, WT in pounds).</p>
+          </div>
+          <div className="dashboard dashboard-compact">
+            <h3>Survey Metrics</h3>
+            <p>Total Fish: {currentEvent?.sets.reduce((sum, set) => sum + set.fish.reduce((s, fish) => s + (fish.count || 1), 0), 0) || 0}</p>
+            <p>Total Effort: {(currentEvent?.sets.reduce((sum, set) => sum + (Number(set.effort_time_hours || set.soak_time_hours) || 0), 0)).toFixed(2) || '0.00'} hours</p>
+            <p>Survey CPUE: {(currentEvent?.sets.reduce((sum, set) => sum + set.fish.reduce((s, fish) => s + (fish.count || 1), 0), 0) / currentEvent?.sets.reduce((sum, set) => sum + (Number(set.effort_time_hours || set.soak_time_hours) || 0), 0)).toFixed(2) || 'N/A'}</p>
+            <p>{getFishCountNote()}</p>
+          </div>
         </div>
-        {showEditNetModal && (
+        <div className="button-group">
+          <button onClick={() => setView('input')}>Back to Input</button>
+          {permissions.canEdit && <button onClick={exportToExcel}>Download Dataset</button>}
+        </div>
+        {resultsModal === 'lengthFrequency' && (
           <div className="modal">
             <div className="modal-content">
-              <h2>Edit Net Pull Date/Location</h2>
-              <form id="editNetForm" onSubmit={handleEditNetSubmit}>
-                <div className="form-group">
-                  <label>Pull Date and Time</label>
-                  <input type="datetime-local" id="editPullDatetime" value={editNetData.pull_datetime} onChange={(e) => setEditNetData({ ...editNetData, pull_datetime: e.target.value })} required />
+              <h2>Length Frequency Distribution</h2>
+              <select value={selectedSpecies} onChange={(e) => {
+                console.log('Selected Species:', e.target.value); // Log selected species
+                setSelectedSpecies(e.target.value);
+              }} disabled={isViewOnly}>
+                <option value="">Select Species</option>
+                {speciesOptions.map(spp => (
+                  <option key={spp} value={spp}>{spp}</option>
+                ))}
+              </select>
+              {selectedSpecies && histogramData() ? (
+                <Bar
+                  key={`length-frequency-${selectedSpecies}`}
+                  data={{
+                    labels: histogramData().labels,
+                    datasets: histogramData().datasets
+                  }}
+                  options={histogramData().options}
+                  height={400}
+                />
+              ) : (
+                <p>Please select a species to view the length frequency histogram.</p>
+              )}
+              <div className="button-group">
+                <button onClick={() => setResultsModal(null)}>Close</button>
+              </div>
+            </div>
+          </div>
+        )}
+        {resultsModal === 'abundanceCondition' && (
+          <div className="modal">
+            <div className="modal-content">
+              <h2>Survey Statistics and Location</h2>
+              <h3>Abundance and Condition</h3>
+              {abundanceCondition().length === 0 ? (
+                <p>No data available for Abundance and Condition.</p>
+              ) : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Species</th>
+                      <th>Number</th>
+                      <th>CPUE</th>
+                      <th>Mean TL (mm)</th>
+                      <th>Range TL (mm)</th>
+                      <th>Mean WT (g)</th>
+                      <th>Range WT (g)</th>
+                      <th>Mean Wr</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {abundanceCondition().map(row => (
+                      <tr key={row.species}>
+                        <td>{row.species}</td>
+                        <td>{row.count}</td>
+                        <td>{row.cpue}</td>
+                        <td>{row.meanTL}</td>
+                        <td>{row.rangeTL}</td>
+                        <td>{row.meanWT}</td>
+                        <td>{row.rangeWT}</td>
+                        <td>{row.meanWr}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              <h3>Location Map</h3>
+              {waypoints.length > 0 ? (
+                <div className="map-container">
+                  <MapContainer center={mapCenter} zoom={10} style={{ height: '300px', width: '100%' }}>
+                    <TileLayer
+                      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                      attribution='© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                    />
+                    {waypoints.map(waypoint => (
+                      <div key={waypoint.set_id}>
+                        <Marker position={waypoint.start} />
+                        <Marker position={waypoint.end} />
+                        <Polyline positions={[waypoint.start, waypoint.end]} color={waypoint.type === 'transect' ? 'blue' : 'red'} />
+                      </div>
+                    ))}
+                  </MapContainer>
                 </div>
-                <div className="form-group">
-                  <label>Start UTM_E</label>
-                  <input type="number" id="editStartUtmE" value={editNetData.start_utm_e} onChange={(e) => setEditNetData({ ...editNetData, start_utm_e: e.target.value })} required />
-                </div>
-                <div className="form-group">
-                  <label>End UTM_N</label>
-                  <input type="number" id="editEndUtmN" value={editNetData.end_utm_n} onChange={(e) => setEditNetData({ ...editNetData, end_utm_n: e.target.value })} required />
-                </div>
-                <div className="button-group">
-                  <button type="submit">Save Changes</button>
-                  <button type="button" onClick={() => setShowEditNetModal(false)}>Cancel</button>
-                </div>
-              </form>
+              ) : (
+                <p>No location data available for this survey.</p>
+              )}
+              <div className="button-group">
+                <button onClick={() => setResultsModal(null)}>Close</button>
+              </div>
+            </div>
+          </div>
+        )}
+        {resultsModal === 'anglerAbundance' && (
+          <div className="modal">
+            <div className="modal-content">
+              <h2>Angler Report</h2>
+              {anglerAbundance().length === 0 ? (
+                <p>No data available for Angler Report.</p>
+              ) : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Species</th>
+                      <th>Number Caught</th>
+                      <th>CPUE</th>
+                      <th>TL Range (in)</th>
+                      <th>Average TL (in)</th>
+                      <th>Average WT (lb)</th>
+                      <th>Range WT (lb)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {anglerAbundance().map(row => (
+                      <tr key={row.species}>
+                        <td>{row.species}</td>
+                        <td>{row.count}</td>
+                        <td>{row.cpue}</td>
+                        <td>{row.tlRange}</td>
+                        <td>{row.avgTL}</td>
+                        <td>{row.avgWT}</td>
+                        <td>{row.wtRange}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              <div className="button-group">
+                <button onClick={() => setResultsModal(null)}>Close</button>
+              </div>
             </div>
           </div>
         )}
       </div>
-    </ErrorBoundary>
+    );
+  };
+
+  const renderPastEventsPage = () => (
+    <div className="past-events-page">
+      <h2>NERO Sportfish Data - Past Surveys</h2>
+      <div className="past-events-content">
+        <div className="left-menu">
+          <h3>Menu</h3>
+          <button onClick={startNewSurvey}>New Survey</button>
+          <div className="form-group">
+            <label>Select Lake to Sync</label>
+            <select value={selectedLake} onChange={(e) => setSelectedLake(e.target.value)}>
+              <option value="">Select a Lake</option>
+              {lakeNames.map((lake, index) => (
+                <option key={index} value={lake}>{lake}</option>
+              ))}
+            </select>
+          </div>
+          <button onClick={fetchEventsFromFirebase}>Sync from Firebase</button>
+        </div>
+        <div className="right-content">
+          {pastEvents.length === 0 ? (
+            <p>No past surveys available.</p>
+          ) : (
+            <>
+              <ul>
+                {pastEvents.map((event, index) => (
+                  <li key={index}>
+                    <input
+                      type="checkbox"
+                      checked={selectedEventIndices.includes(index)}
+                      onChange={() => {
+                        setSelectedEventIndices(prev =>
+                          prev.includes(index)
+                            ? prev.filter(i => i !== index)
+                            : [...prev, index]
+                        );
+                      }}
+                    />
+                    {event.location?.lake} - {event.location?.date} - {event.location?.gear} {event.is_finalized ? '(Finalized)' : '(Unfinalized)'}
+                    <button onClick={() => { loadPastEvent(event); setView('input'); }}>Load</button>
+                    <button onClick={() => deleteSurvey(event, index)}>Delete Locally</button>
+                  </li>
+                ))}
+              </ul>
+              <div className="button-group">
+                <button onClick={deleteSelectedEvents}>Delete from Firebase</button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  // Function to reset the app state for a new survey
+  const startNewSurvey = () => {
+    setCurrentEvent(null);
+    setEventData({
+      lake: '', location: '', date: '', observers: '', gear: '',
+      cond: '', pH: '', tdS: '', salts: '', temp_water_c: '', amps: '', field_notes: ''
+    });
+    setGearType('');
+    setSelectedTransect(null);
+    setFishData({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '', count: 1 });
+    setSelectedSpecies('');
+    setSelectedFishIndices([]);
+    setSelectedEventIndices([]);
+    setEditingFishIndex(null);
+    setIsViewOnly(false);
+    localStorage.removeItem('currentEvent');
+    setView('input');
+    document.title = 'New Survey Input'; // Set the page title to 'New Survey Input'
+  };
+
+  // Function to toggle offline mode
+  const toggleOfflineMode = () => {
+    setIsOfflineMode(!isOfflineMode);
+  };
+
+  const isValidUTM = (easting, northing) => {
+    return easting >= 100000 && easting <= 999999 && northing >= 0 && northing <= 10000000;
+  };
+
+  return (
+    <div>
+      <header className="top-bar">
+        <h1>NERO Sportfish Data</h1>
+        <div className="top-bar-actions">
+          {user && (
+            <span style={{ color: isOfflineMode ? 'red' : 'black' }}>
+              Welcome, {user.displayName || user.email} ({role})
+            </span>
+          )}
+          {user && <button onClick={handleSignOut}>Sign Out</button>}
+          <button onClick={() => setView('home')}>Home</button>
+          {role === 'admin' && <button onClick={() => setView('admin')}>Admin Panel</button>}
+          <button onClick={toggleOfflineMode}>
+            {isOfflineMode ? 'Go Online' : 'Go Offline'}
+          </button>
+        </div>
+      </header>
+      <div className="main-content">
+        {view === 'signIn' ? (
+          <div>
+            <SignIn onSignIn={() => setView('home')} />
+            <p>Don't have an account? <button onClick={() => setView('signUp')}>Sign Up</button></p>
+          </div>
+        ) : view === 'signUp' ? (
+          <div>
+            <SignUp onSignUp={() => setView('home')} />
+            <p>Already have an account? <button onClick={() => setView('signIn')}>Sign In</button></p>
+          </div>
+        ) : view === 'admin' ? (
+          <Admin />
+        ) : view === 'home' ? (
+          renderHomePage()
+        ) : view === 'input' ? (
+          renderInputPage()
+        ) : view === 'results' ? (
+          renderResultsPage()
+        ) : (
+          renderPastEventsPage()
+        )}
+      </div>
+    </div>
   );
 }
 
