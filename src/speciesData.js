@@ -10,7 +10,9 @@ const speciesData = {
   "GS": {name: "Green Sunfish"},
   "TGT": {name: "Tiger Trout"},
   "CC": {name: "Common Carp"},
-  "BBH": {name: "Black Bullhead"}
+  "BBH": {name: "Black Bullhead"},
+  "WIP": {name: "Wiper"},
+  "TM": {name: "Tiger Musky", a: -6.126, b: 3.337}
 };
 
 export default speciesData;
