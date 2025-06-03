@@ -7,12 +7,14 @@ const speciesData = {
   "SMB": { name: "Smallmouth Bass", a: -5.329, b: 3.2 },
   "WAE": { name: "Walleye", a: -5.453, b: 3.18 },
   "YP": { name: "Yellow Perch", a: -5.386, b: 3.23 },
-  "GS": {name: "Green Sunfish"},
+  "GS": {name: "Green Sunfish", a: -5.374, b: 3.316},
   "TGT": {name: "Tiger Trout"},
   "CC": {name: "Common Carp"},
   "BBH": {name: "Black Bullhead"},
   "WIP": {name: "Wiper"},
-  "TM": {name: "Tiger Musky", a: -6.126, b: 3.337}
+  "TM": {name: "Tiger Musky", a: -6.126, b: 3.337},
+  "FMS": {name: "Flannelmouth Sucker"},
+  "MTW": {name: "Mountain Whitefish", a: -5.231, b:3.140},
 };
 
 export default speciesData;
