@@ -16,6 +16,8 @@ import SignIn from './SignIn';
 import SignUp from './SignUp';
 import { getAuth, onAuthStateChanged, signOut } from 'firebase/auth';
 import Admin from './Admin';
+import { Pie } from 'react-chartjs-2';
+import { ArcElement } from 'chart.js';
 
 // Register Chart.js components
 ChartJS.register(
@@ -25,7 +27,8 @@ ChartJS.register(
   Title,
   Tooltip,
   Legend,
-  annotationPlugin
+  annotationPlugin,
+  ArcElement // Register ArcElement for pie charts
 );
 
 // Fix Leaflet default marker icon issue
@@ -35,6 +38,20 @@ L.Icon.Default.mergeOptions({
   iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
 });
+
+const dietContentOptions = [
+  'Empty',
+  'Zooplankton', 
+  'Aquatic Insects',
+  'Terrestrial Insects',
+  'Chironomids',
+  'Yellow Perch',
+  'Bluegill',
+  'Fish Parts',
+  'Aquatic Plants',
+  'Worms',
+  'Other'
+]; // Diet content options for fish stomach analysis
 
 function App() {
   const [view, setView] = useState('signIn');
@@ -66,6 +83,10 @@ function App() {
   const [lakeNames, setLakeNames] = useState([]);
   const [selectedLake, setSelectedLake] = useState('');
   const [isMapVisible, setIsMapVisible] = useState(false);
+  const [selectedSpeciesForDiet, setSelectedSpeciesForDiet] = useState('');
+  const [customDietContent, setCustomDietContent] = useState('');
+  const [customDietEntries, setCustomDietEntries] = useState([]);
+  const [selectedSpeciesForMap, setSelectedSpeciesForMap] = useState('');
 
   useEffect(() => {
     const auth = getAuth();
@@ -88,6 +109,26 @@ function App() {
     });
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    // Load custom diet entries from localStorage on app start
+    const storedCustomDietEntries = JSON.parse(localStorage.getItem('customDietEntries') || '[]');
+    setCustomDietEntries(storedCustomDietEntries);
+  }, []);
+
+  // Function to add a new custom diet entry
+  const addCustomDietEntry = (newEntry) => {
+    if (newEntry && !dietContentOptions.includes(newEntry) && !customDietEntries.includes(newEntry)) {
+      const updatedCustomEntries = [...customDietEntries, newEntry];
+      setCustomDietEntries(updatedCustomEntries);
+      localStorage.setItem('customDietEntries', JSON.stringify(updatedCustomEntries));
+    }
+  };
+
+  // Combine predefined and custom diet options
+  const getAllDietOptions = () => {
+    return [...dietContentOptions, ...customDietEntries];
+  };
 
   const handleSignOut = () => {
     const auth = getAuth();
@@ -216,6 +257,11 @@ function App() {
   const handleFishChange = (field, value) => {
     if (isViewOnly) return;
     setFishData({ ...fishData, [field]: value });
+    
+    // Reset custom diet content when not selecting "Other"
+    if (field === 'stomach_content' && value !== 'Other') {
+      setCustomDietContent('');
+    }
   };
 
   const getGPSLocation = (setFormData, formType) => {
@@ -397,11 +443,20 @@ function App() {
       alert('Please select a transect or net set before adding fish.');
       return;
     }
+    
+    // Use custom diet content if "Other" is selected
+    const stomachContent = fishData.stomach_content === 'Other' ? customDietContent : fishData.stomach_content;
+    
+    // Add custom diet content to the dropdown options if it's new
+    if (fishData.stomach_content === 'Other' && customDietContent) {
+      addCustomDietEntry(customDietContent);
+    }
+    
     const newFish = {
       spp: fishData.spp,
       length: Number(fishData.length) || null,
       weight: Number(fishData.weight) || null,
-      stomach_content: fishData.stomach_content,
+      stomach_content: stomachContent,
       sex: fishData.sex,
       fats: fishData.fats,
       notes: fishData.notes,
@@ -419,6 +474,7 @@ function App() {
     setCurrentEvent(updatedEvent);
     localStorage.setItem('currentEvent', JSON.stringify(updatedEvent));
     setFishData({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '', count: 1 });
+    setCustomDietContent('');
     setSelectedFishIndices([]);
   };
 
@@ -458,11 +514,20 @@ function App() {
       alert('Please select a fish entry to update.');
       return;
     }
+    
+    // Use custom diet content if "Other" is selected
+    const stomachContent = fishData.stomach_content === 'Other' ? customDietContent : fishData.stomach_content;
+    
+    // Add custom diet content to the dropdown options if it's new
+    if (fishData.stomach_content === 'Other' && customDietContent) {
+      addCustomDietEntry(customDietContent);
+    }
+    
     const updatedFish = {
       spp: fishData.spp,
       length: Number(fishData.length) || null,
       weight: Number(fishData.weight) || null,
-      stomach_content: fishData.stomach_content,
+      stomach_content: stomachContent,
       sex: fishData.sex,
       fats: fishData.fats,
       notes: fishData.notes,
@@ -483,6 +548,7 @@ function App() {
     setCurrentEvent(updatedEvent);
     localStorage.setItem('currentEvent', JSON.stringify(updatedEvent));
     setFishData({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '', count: 1 });
+    setCustomDietContent('');
     setEditingFishIndex(null);
     setSelectedFishIndices([]);
   };
@@ -648,22 +714,29 @@ function App() {
     currentEvent.sets.forEach(set => {
       set.fish.forEach(fish => {
         if (!fish.spp) return;
-        if (!speciesStats[fish.spp]) speciesStats[fish.spp] = { count: 0, tl: [], wt: [], wr: [] };
+        if (!speciesStats[fish.spp]) speciesStats[fish.spp] = { count: 0, tl: [], wt: [], wr: [], kFactor: [] };
         speciesStats[fish.spp].count += fish.count || 1;
         if (fish.length) {
           for (let i = 0; i < (fish.count || 1); i++) {
             speciesStats[fish.spp].tl.push(fish.length);
           }
         }
-        if (fish.weight) {
+        if (fish.weight && fish.length) {
           for (let i = 0; i < (fish.count || 1); i++) {
             speciesStats[fish.spp].wt.push(fish.weight);
             const speciesCoefficients = speciesData[fish.spp];
-            if (speciesCoefficients && speciesCoefficients.a && speciesCoefficients.b && fish.length) {
+            
+            // Check if species has Wr coefficients
+            if (speciesCoefficients && speciesCoefficients.a && speciesCoefficients.b) {
+              // Calculate Wr
               const logWs = speciesCoefficients.a + speciesCoefficients.b * Math.log10(fish.length);
               const Ws = Math.pow(10, logWs);
               const Wr = (fish.weight / Ws) * 100;
               speciesStats[fish.spp].wr.push(Wr);
+            } else {
+              // Calculate K-Factor: K = (W / L³) × 100000
+              const kFactor = (fish.weight / Math.pow(fish.length, 3)) * 100000;
+              speciesStats[fish.spp].kFactor.push(kFactor);
             }
           }
         }
@@ -677,13 +750,34 @@ function App() {
       const tl = speciesStats[spp].tl;
       const wt = speciesStats[spp].wt;
       const wr = speciesStats[spp].wr;
+      const kFactor = speciesStats[spp].kFactor;
+      
       const meanTL = tl.length ? (tl.reduce((a, b) => a + b, 0) / tl.length).toFixed(1) : 0;
       const rangeTL = tl.length ? `${Math.min(...tl)}-${Math.max(...tl)}` : '-';
       const meanWT = wt.length ? (wt.reduce((a, b) => a + b, 0) / wt.length).toFixed(1) : 0;
       const rangeWT = wt.length ? `${Math.min(...wt)}-${Math.max(...wt)}` : '-';
-      const meanWr = wr.length ? (wr.reduce((a, b) => a + b, 0) / wr.length).toFixed(1) : '-';
+      
+      // Determine if K-Factor was used and calculate mean value
+      const usedKFactor = kFactor.length > 0 && wr.length === 0;
+      const meanWr = wr.length > 0 
+        ? (wr.reduce((a, b) => a + b, 0) / wr.length).toFixed(1)
+        : kFactor.length > 0 
+          ? (kFactor.reduce((a, b) => a + b, 0) / kFactor.length).toFixed(1)
+          : '-';
+      
       const speciesCpue = totalEffortOrSoakHours > 0 ? (count / Number(totalEffortOrSoakHours)).toFixed(2) : 0;
-      return { species: spp, count, cpue: speciesCpue, meanTL, rangeTL, meanWT, rangeWT, meanWr };
+      
+      return { 
+        species: spp, 
+        count, 
+        cpue: speciesCpue, 
+        meanTL, 
+        rangeTL, 
+        meanWT, 
+        rangeWT, 
+        meanWr, 
+        usedKFactor 
+      };
     });
   };
 
@@ -1080,9 +1174,32 @@ function App() {
           <input type="number" value={fishData.weight} onChange={(e) => handleFishChange('weight', e.target.value)} disabled={isViewOnly} />
         </div>
         <div className="form-group">
-          <label>Stomach Content</label>
-          <input value={fishData.stomach_content} onChange={(e) => handleFishChange('stomach_content', e.target.value)} disabled={isViewOnly} />
+          <label>Diet Content</label>
+          <select
+            value={fishData.stomach_content}
+            onChange={(e) => handleFishChange('stomach_content', e.target.value)}
+            required
+            disabled={isViewOnly}
+          >
+            <option value="">Select Diet Content</option>
+            {getAllDietOptions().map(content => (
+              <option key={content} value={content}>{content}</option>
+            ))}
+          </select>
         </div>
+        {fishData.stomach_content === 'Other' && (
+          <div className="form-group">
+            <label>Custom Diet Content</label>
+            <input
+              type="text"
+              value={customDietContent}
+              onChange={(e) => setCustomDietContent(e.target.value)}
+              placeholder="Enter custom diet content"
+              required
+              disabled={isViewOnly}
+            />
+          </div>
+        )}
         <div className="form-group">
           <label>Sex</label>
           <input value={fishData.sex} onChange={(e) => handleFishChange('sex', e.target.value)} disabled={isViewOnly} />
@@ -1103,6 +1220,7 @@ function App() {
               type="button"
               onClick={() => {
                 setFishData({ spp: '', length: '', weight: '', stomach_content: '', sex: '', fats: '', notes: '', count: 1 });
+                setCustomDietContent('');
                 setEditingFishIndex(null);
               }}
               disabled={isViewOnly}
@@ -1155,16 +1273,28 @@ function App() {
                           onClick={() => {
                             if (isViewOnly || !selectedFishIndices.includes(index)) return;
                             setEditingFishIndex(index);
+                            const fish = currentEvent.sets.find(set => set.set_id === selectedTransect)?.fish[index];
+                            
+                            // Check if the stomach content is a custom entry (not in predefined options)
+                            const isCustomContent = fish.stomach_content && !getAllDietOptions().includes(fish.stomach_content);
+                            
                             setFishData({
                               spp: fish.spp || '',
                               length: fish.length || '',
                               weight: fish.weight || '',
-                              stomach_content: fish.stomach_content || '',
+                              stomach_content: isCustomContent ? 'Other' : (fish.stomach_content || ''),
                               sex: fish.sex || '',
                               fats: fish.fats || '',
                               notes: fish.notes || '',
                               count: fish.count || 1
                             });
+                            
+                            // Set custom diet content if it's a custom entry
+                            if (isCustomContent) {
+                              setCustomDietContent(fish.stomach_content);
+                            } else {
+                              setCustomDietContent('');
+                            }
                           }}
                           style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
@@ -1174,16 +1304,28 @@ function App() {
                           onClick={() => {
                             if (isViewOnly || !selectedFishIndices.includes(index)) return;
                             setEditingFishIndex(index);
+                            const fish = currentEvent.sets.find(set => set.set_id === selectedTransect)?.fish[index];
+                            
+                            // Check if the stomach content is a custom entry (not in predefined options)
+                            const isCustomContent = fish.stomach_content && !getAllDietOptions().includes(fish.stomach_content);
+                            
                             setFishData({
                               spp: fish.spp || '',
                               length: fish.length || '',
                               weight: fish.weight || '',
-                              stomach_content: fish.stomach_content || '',
+                              stomach_content: isCustomContent ? 'Other' : (fish.stomach_content || ''),
                               sex: fish.sex || '',
                               fats: fish.fats || '',
                               notes: fish.notes || '',
                               count: fish.count || 1
                             });
+                            
+                            // Set custom diet content if it's a custom entry
+                            if (isCustomContent) {
+                              setCustomDietContent(fish.stomach_content);
+                            } else {
+                              setCustomDietContent('');
+                            }
                           }}
                           style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
@@ -1193,16 +1335,28 @@ function App() {
                           onClick={() => {
                             if (isViewOnly || !selectedFishIndices.includes(index)) return;
                             setEditingFishIndex(index);
+                            const fish = currentEvent.sets.find(set => set.set_id === selectedTransect)?.fish[index];
+                            
+                            // Check if the stomach content is a custom entry (not in predefined options)
+                            const isCustomContent = fish.stomach_content && !getAllDietOptions().includes(fish.stomach_content);
+                            
                             setFishData({
                               spp: fish.spp || '',
                               length: fish.length || '',
                               weight: fish.weight || '',
-                              stomach_content: fish.stomach_content || '',
+                              stomach_content: isCustomContent ? 'Other' : (fish.stomach_content || ''),
                               sex: fish.sex || '',
                               fats: fish.fats || '',
                               notes: fish.notes || '',
                               count: fish.count || 1
                             });
+                            
+                            // Set custom diet content if it's a custom entry
+                            if (isCustomContent) {
+                              setCustomDietContent(fish.stomach_content);
+                            } else {
+                              setCustomDietContent('');
+                            }
                           }}
                           style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
@@ -1212,16 +1366,28 @@ function App() {
                           onClick={() => {
                             if (isViewOnly || !selectedFishIndices.includes(index)) return;
                             setEditingFishIndex(index);
+                            const fish = currentEvent.sets.find(set => set.set_id === selectedTransect)?.fish[index];
+                            
+                            // Check if the stomach content is a custom entry (not in predefined options)
+                            const isCustomContent = fish.stomach_content && !getAllDietOptions().includes(fish.stomach_content);
+                            
                             setFishData({
                               spp: fish.spp || '',
                               length: fish.length || '',
                               weight: fish.weight || '',
-                              stomach_content: fish.stomach_content || '',
+                              stomach_content: isCustomContent ? 'Other' : (fish.stomach_content || ''),
                               sex: fish.sex || '',
                               fats: fish.fats || '',
                               notes: fish.notes || '',
                               count: fish.count || 1
                             });
+                            
+                            // Set custom diet content if it's a custom entry
+                            if (isCustomContent) {
+                              setCustomDietContent(fish.stomach_content);
+                            } else {
+                              setCustomDietContent('');
+                            }
                           }}
                           style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
@@ -1231,16 +1397,28 @@ function App() {
                           onClick={() => {
                             if (isViewOnly || !selectedFishIndices.includes(index)) return;
                             setEditingFishIndex(index);
+                            const fish = currentEvent.sets.find(set => set.set_id === selectedTransect)?.fish[index];
+                            
+                            // Check if the stomach content is a custom entry (not in predefined options)
+                            const isCustomContent = fish.stomach_content && !getAllDietOptions().includes(fish.stomach_content);
+                            
                             setFishData({
                               spp: fish.spp || '',
                               length: fish.length || '',
                               weight: fish.weight || '',
-                              stomach_content: fish.stomach_content || '',
+                              stomach_content: isCustomContent ? 'Other' : (fish.stomach_content || ''),
                               sex: fish.sex || '',
                               fats: fish.fats || '',
                               notes: fish.notes || '',
                               count: fish.count || 1
                             });
+                            
+                            // Set custom diet content if it's a custom entry
+                            if (isCustomContent) {
+                              setCustomDietContent(fish.stomach_content);
+                            } else {
+                              setCustomDietContent('');
+                            }
                           }}
                           style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
@@ -1250,16 +1428,28 @@ function App() {
                           onClick={() => {
                             if (isViewOnly || !selectedFishIndices.includes(index)) return;
                             setEditingFishIndex(index);
+                            const fish = currentEvent.sets.find(set => set.set_id === selectedTransect)?.fish[index];
+                            
+                            // Check if the stomach content is a custom entry (not in predefined options)
+                            const isCustomContent = fish.stomach_content && !getAllDietOptions().includes(fish.stomach_content);
+                            
                             setFishData({
                               spp: fish.spp || '',
                               length: fish.length || '',
                               weight: fish.weight || '',
-                              stomach_content: fish.stomach_content || '',
+                              stomach_content: isCustomContent ? 'Other' : (fish.stomach_content || ''),
                               sex: fish.sex || '',
                               fats: fish.fats || '',
                               notes: fish.notes || '',
                               count: fish.count || 1
                             });
+                            
+                            // Set custom diet content if it's a custom entry
+                            if (isCustomContent) {
+                              setCustomDietContent(fish.stomach_content);
+                            } else {
+                              setCustomDietContent('');
+                            }
                           }}
                           style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
@@ -1269,16 +1459,28 @@ function App() {
                           onClick={() => {
                             if (isViewOnly || !selectedFishIndices.includes(index)) return;
                             setEditingFishIndex(index);
+                            const fish = currentEvent.sets.find(set => set.set_id === selectedTransect)?.fish[index];
+                            
+                            // Check if the stomach content is a custom entry (not in predefined options)
+                            const isCustomContent = fish.stomach_content && !getAllDietOptions().includes(fish.stomach_content);
+                            
                             setFishData({
                               spp: fish.spp || '',
                               length: fish.length || '',
                               weight: fish.weight || '',
-                              stomach_content: fish.stomach_content || '',
+                              stomach_content: isCustomContent ? 'Other' : (fish.stomach_content || ''),
                               sex: fish.sex || '',
                               fats: fish.fats || '',
                               notes: fish.notes || '',
                               count: fish.count || 1
                             });
+                            
+                            // Set custom diet content if it's a custom entry
+                            if (isCustomContent) {
+                              setCustomDietContent(fish.stomach_content);
+                            } else {
+                              setCustomDietContent('');
+                            }
                           }}
                           style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
@@ -1288,16 +1490,28 @@ function App() {
                           onClick={() => {
                             if (isViewOnly || !selectedFishIndices.includes(index)) return;
                             setEditingFishIndex(index);
+                            const fish = currentEvent.sets.find(set => set.set_id === selectedTransect)?.fish[index];
+                            
+                            // Check if the stomach content is a custom entry (not in predefined options)
+                            const isCustomContent = fish.stomach_content && !getAllDietOptions().includes(fish.stomach_content);
+                            
                             setFishData({
                               spp: fish.spp || '',
                               length: fish.length || '',
                               weight: fish.weight || '',
-                              stomach_content: fish.stomach_content || '',
+                              stomach_content: isCustomContent ? 'Other' : (fish.stomach_content || ''),
                               sex: fish.sex || '',
                               fats: fish.fats || '',
                               notes: fish.notes || '',
                               count: fish.count || 1
                             });
+                            
+                            // Set custom diet content if it's a custom entry
+                            if (isCustomContent) {
+                              setCustomDietContent(fish.stomach_content);
+                            } else {
+                              setCustomDietContent('');
+                            }
                           }}
                           style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
@@ -1307,16 +1521,28 @@ function App() {
                           onClick={() => {
                             if (isViewOnly || !selectedFishIndices.includes(index)) return;
                             setEditingFishIndex(index);
+                            const fish = currentEvent.sets.find(set => set.set_id === selectedTransect)?.fish[index];
+                            
+                            // Check if the stomach content is a custom entry (not in predefined options)
+                            const isCustomContent = fish.stomach_content && !getAllDietOptions().includes(fish.stomach_content);
+                            
                             setFishData({
                               spp: fish.spp || '',
                               length: fish.length || '',
                               weight: fish.weight || '',
-                              stomach_content: fish.stomach_content || '',
+                              stomach_content: isCustomContent ? 'Other' : (fish.stomach_content || ''),
                               sex: fish.sex || '',
                               fats: fish.fats || '',
                               notes: fish.notes || '',
                               count: fish.count || 1
                             });
+                            
+                            // Set custom diet content if it's a custom entry
+                            if (isCustomContent) {
+                              setCustomDietContent(fish.stomach_content);
+                            } else {
+                              setCustomDietContent('');
+                            }
                           }}
                           style={{ cursor: selectedFishIndices.includes(index) && !isViewOnly ? 'pointer' : 'default' }}
                         >
@@ -1405,20 +1631,65 @@ function App() {
     </div>
   );
 
-  const renderResultsPage = () => {
-    const waypoints = currentEvent?.sets.map(set => {
-      const { start_utm_e, end_utm_n } = set.location;
-      const start = toLatLon(Number(start_utm_e), Number(end_utm_n), 12, 'N');
-      const end = toLatLon(Number(start_utm_e) + 10, Number(end_utm_n) + 10, 12, 'N');
-      return {
-        set_id: set.set_id,
-        type: set.type,
-        start: [start.latitude, start.longitude],
-        end: [end.latitude, end.longitude]
-      };
-    }) || [];
+  const getDietData = () => {
+    if (!currentEvent || !currentEvent.sets) return { labels: [], datasets: [] };
 
-    const mapCenter = waypoints.length > 0 ? waypoints[0].start : [39.0, -110.0]; // Default center
+    const dietCounts = {};
+    currentEvent.sets.forEach(set => {
+      set.fish.forEach(fish => {
+        const content = fish.stomach_content || 'Unknown';
+        dietCounts[content] = (dietCounts[content] || 0) + (fish.count || 1);
+      });
+    });
+
+    const labels = Object.keys(dietCounts);
+    const data = Object.values(dietCounts);
+
+    return {
+      labels,
+      datasets: [
+        {
+          data,
+          backgroundColor: labels.map((_, index) => `hsl(${index * 360 / labels.length}, 70%, 50%)`),
+          hoverBackgroundColor: labels.map((_, index) => `hsl(${index * 360 / labels.length}, 70%, 60%)`)
+        }
+      ]
+    };
+  };
+
+  const getDietDataBySpecies = (species) => {
+    if (!currentEvent || !currentEvent.sets || !species) return { labels: [], datasets: [] };
+
+    const dietCounts = {};
+    currentEvent.sets.forEach(set => {
+      set.fish.forEach(fish => {
+        if (fish.spp === species) {
+          const content = fish.stomach_content.trim() || 'Unknown';
+          dietCounts[content] = (dietCounts[content] || 0) + (fish.count || 1);
+        }
+      });
+    });
+
+    const labels = Object.keys(dietCounts);
+    const data = Object.values(dietCounts);
+
+    return {
+      labels,
+      datasets: [
+        {
+          data,
+          backgroundColor: labels.map((_, index) => `hsl(${index * 360 / labels.length}, 70%, 50%)`),
+          hoverBackgroundColor: labels.map((_, index) => `hsl(${index * 360 / labels.length}, 70%, 60%)`)
+        }
+      ]
+    };
+  };
+
+  const renderResultsPage = () => {
+    const waypoints = getFilteredWaypoints(selectedSpeciesForMap);
+    const mapCenter = waypoints.length > 0 ? waypoints[0].start : [39.0, -110.0];
+    const speciesOptionsForDiet = [...new Set(currentEvent && currentEvent.sets ? currentEvent.sets.flatMap(set => set.fish.map(fish => fish.spp)).filter(Boolean) : [])];
+    const pieData = getDietDataBySpecies(selectedSpeciesForDiet);
 
     return (
       <div className="results-page">
@@ -1458,7 +1729,7 @@ function App() {
             <div className="modal-content">
               <h2>Length Frequency Distribution</h2>
               <select value={selectedSpecies} onChange={(e) => {
-                console.log('Selected Species:', e.target.value); // Log selected species
+                console.log('Selected Species:', e.target.value);
                 setSelectedSpecies(e.target.value);
               }} disabled={isViewOnly}>
                 <option value="">Select Species</option>
@@ -1493,36 +1764,52 @@ function App() {
               {abundanceCondition().length === 0 ? (
                 <p>No data available for Abundance and Condition.</p>
               ) : (
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Species</th>
-                      <th>Number</th>
-                      <th>CPUE</th>
-                      <th>Mean TL (mm)</th>
-                      <th>Range TL (mm)</th>
-                      <th>Mean WT (g)</th>
-                      <th>Range WT (g)</th>
-                      <th>Mean Wr</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {abundanceCondition().map(row => (
-                      <tr key={row.species}>
-                        <td>{row.species}</td>
-                        <td>{row.count}</td>
-                        <td>{row.cpue}</td>
-                        <td>{row.meanTL}</td>
-                        <td>{row.rangeTL}</td>
-                        <td>{row.meanWT}</td>
-                        <td>{row.rangeWT}</td>
-                        <td>{row.meanWr}</td>
+                <>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Species</th>
+                        <th>Number</th>
+                        <th>CPUE</th>
+                        <th>Mean TL (mm)</th>
+                        <th>Range TL (mm)</th>
+                        <th>Mean WT (g)</th>
+                        <th>Range WT (g)</th>
+                        <th>Mean Wr</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {abundanceCondition().map(row => (
+                        <tr key={row.species}>
+                          <td>{row.species}{row.usedKFactor ? '*' : ''}</td>
+                          <td>{row.count}</td>
+                          <td>{row.cpue}</td>
+                          <td>{row.meanTL}</td>
+                          <td>{row.rangeTL}</td>
+                          <td>{row.meanWT}</td>
+                          <td>{row.rangeWT}</td>
+                          <td>{row.meanWr}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {abundanceCondition().some(row => row.usedKFactor) && (
+                    <p style={{ fontSize: '12px', color: '#666', marginTop: '10px' }}>
+                      * Denotes K-Factor analysis was used.
+                    </p>
+                  )}
+                </>
               )}
               <h3>Location Map</h3>
+              <div className="form-group">
+                <label>Filter by Species</label>
+                <select value={selectedSpeciesForMap} onChange={(e) => setSelectedSpeciesForMap(e.target.value)}>
+                  <option value="">All Species</option>
+                  {speciesOptionsForDiet.map(spp => (
+                    <option key={spp} value={spp}>{spp}</option>
+                  ))}
+                </select>
+              </div>
               {waypoints.length > 0 ? (
                 <div className="map-container">
                   <MapContainer center={mapCenter} zoom={10} style={{ height: '300px', width: '100%' }}>
@@ -1534,14 +1821,29 @@ function App() {
                       <div key={waypoint.set_id}>
                         <Marker position={waypoint.start} />
                         <Marker position={waypoint.end} />
-                        <Polyline positions={[waypoint.start, waypoint.end]} color={waypoint.type === 'transect' ? 'blue' : 'red'} />
+                        <Polyline 
+                          positions={[waypoint.start, waypoint.end]} 
+                          color={waypoint.type === 'transect' ? 'blue' : 'red'} 
+                        />
                       </div>
                     ))}
                   </MapContainer>
+                  <p style={{ marginTop: '10px', fontSize: '14px', color: '#666' }}>
+                    Showing {waypoints.length} location(s) {selectedSpeciesForMap ? `where ${selectedSpeciesForMap} was caught` : 'with fish data'}
+                    {selectedSpeciesForMap && ` (Total: ${waypoints.reduce((sum, wp) => sum + wp.fishCount, 0)} fish)`}
+                  </p>
                 </div>
               ) : (
-                <p>No location data available for this survey.</p>
+                <p>No location data available for {selectedSpeciesForMap || 'this survey'}.</p>
               )}
+              <h3>Fish Diet Distribution</h3>
+              <select value={selectedSpeciesForDiet} onChange={(e) => setSelectedSpeciesForDiet(e.target.value)}>
+                <option value="">Select Species</option>
+                {speciesOptionsForDiet.map(spp => (
+                  <option key={spp} value={spp}>{spp}</option>
+                ))}
+              </select>
+              {selectedSpeciesForDiet && <Pie data={pieData} />}
               <div className="button-group">
                 <button onClick={() => setResultsModal(null)}>Close</button>
               </div>
@@ -1582,6 +1884,14 @@ function App() {
                   </tbody>
                 </table>
               )}
+              <h3>Fish Diet Distribution</h3>
+              <select value={selectedSpeciesForDiet} onChange={(e) => setSelectedSpeciesForDiet(e.target.value)}>
+                <option value="">Select Species</option>
+                {speciesOptionsForDiet.map(spp => (
+                  <option key={spp} value={spp}>{spp}</option>
+                ))}
+              </select>
+              {selectedSpeciesForDiet && <Pie data={pieData} />}
               <div className="button-group">
                 <button onClick={() => setResultsModal(null)}>Close</button>
               </div>
@@ -1672,6 +1982,39 @@ function App() {
 
   const isValidUTM = (easting, northing) => {
     return easting >= 100000 && easting <= 999999 && northing >= 0 && northing <= 10000000;
+  };
+
+  // Function to get waypoints filtered by species
+  const getFilteredWaypoints = (species) => {
+    if (!currentEvent?.sets) return [];
+    
+    const filteredSets = currentEvent.sets.filter(set => {
+      if (!species) return true; // Show all if no species selected
+      return set.fish.some(fish => fish.spp === species);
+    });
+
+    return filteredSets.map(set => {
+      const { start_utm_e, end_utm_n } = set.location;
+      if (start_utm_e == null || end_utm_n == null) {
+        console.error('Invalid coordinates:', start_utm_e, end_utm_n);
+        return null;
+      }
+      try {
+        const start = toLatLon(Number(start_utm_e), Number(end_utm_n), 12, 'N');
+        const end = toLatLon(Number(start_utm_e) + 10, Number(end_utm_n) + 10, 12, 'N');
+        return {
+          set_id: set.set_id,
+          type: set.type,
+          start: [start.latitude, start.longitude],
+          end: [end.latitude, end.longitude],
+          species: species || 'All Species',
+          fishCount: set.fish.filter(fish => !species || fish.spp === species).reduce((sum, fish) => sum + (fish.count || 1), 0)
+        };
+      } catch (error) {
+        console.error('Error converting UTM to Lat/Lon:', error);
+        return null;
+      }
+    }).filter(Boolean);
   };
 
   return (

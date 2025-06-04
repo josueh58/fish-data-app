@@ -9,7 +9,7 @@ const speciesData = {
   "YP": { name: "Yellow Perch", a: -5.386, b: 3.23 },
   "GS": {name: "Green Sunfish", a: -5.374, b: 3.316},
   "TGT": {name: "Tiger Trout"},
-  "CC": {name: "Common Carp"},
+  "CC": {name: "Common Carp", a: -4.639, b: 2.920},
   "BBH": {name: "Black Bullhead"},
   "WIP": {name: "Wiper"},
   "TM": {name: "Tiger Musky", a: -6.126, b: 3.337},
