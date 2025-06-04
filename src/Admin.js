@@ -66,7 +66,7 @@ function Admin({ user, setUser, role, setRole, setView, setPermissions }) {
       }
     });
     return () => unsubscribe();
-  }, []);
+  }, [role, setPermissions, setRole, setUser, setView]);
 
   if (loading) return <p>Loading...</p>;
   if (error) return <p>{error}</p>;

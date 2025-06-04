@@ -1,4 +1,4 @@
-import { useState, useEffect, Component } from 'react';
+import { useState, useEffect, Component, useCallback } from 'react';
 import { db } from './firebase';
 import { collection, addDoc, getDocs, query, where, doc, deleteDoc, getDoc, setDoc } from 'firebase/firestore';
 import { Bar } from 'react-chartjs-2';
@@ -54,10 +54,10 @@ const dietContentOptions = [
 ]; // Diet content options for fish stomach analysis
 
 function App() {
-  const [view, setView] = useState('signIn');
-  const [user, setUser] = useState(null);
-  const [role, setRole] = useState(null);
-  const [permissions, setPermissions] = useState({ canEdit: false, canDelete: false });
+  const [view, setViewState] = useState('signIn');
+  const [user, setUserState] = useState(null);
+  const [role, setRoleState] = useState(null);
+  const [permissions, setPermissionsState] = useState({ canEdit: false, canDelete: false });
   const [eventData, setEventData] = useState({
     lake: '', location: '', date: '', observers: '', gear: '',
     cond: '', pH: '', tdS: '', salts: '', temp_water_c: '', amps: '', field_notes: ''
@@ -88,6 +88,23 @@ function App() {
   const [customDietEntries, setCustomDietEntries] = useState([]);
   const [selectedSpeciesForMap, setSelectedSpeciesForMap] = useState('');
 
+  // Wrap state setters in useCallback to prevent unnecessary re-renders
+  const setView = useCallback((view) => {
+    setViewState(view);
+  }, []);
+
+  const setUser = useCallback((user) => {
+    setUserState(user);
+  }, []);
+
+  const setRole = useCallback((role) => {
+    setRoleState(role);
+  }, []);
+
+  const setPermissions = useCallback((permissions) => {
+    setPermissionsState(permissions);
+  }, []);
+
   useEffect(() => {
     const auth = getAuth();
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
@@ -108,7 +125,7 @@ function App() {
       }
     });
     return () => unsubscribe();
-  }, []);
+  }, [setView, setUser, setRole, setPermissions]);
 
   useEffect(() => {
     // Load custom diet entries from localStorage on app start
@@ -2047,7 +2064,14 @@ function App() {
             <p>Already have an account? <button onClick={() => setView('signIn')}>Sign In</button></p>
           </div>
         ) : view === 'admin' ? (
-          <Admin />
+          <Admin 
+            user={user} 
+            setUser={setUser} 
+            role={role} 
+            setRole={setRole} 
+            setView={setView} 
+            setPermissions={setPermissions} 
+          />
         ) : view === 'home' ? (
           renderHomePage()
         ) : view === 'input' ? (
